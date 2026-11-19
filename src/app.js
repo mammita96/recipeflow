@@ -353,6 +353,8 @@
   // =====================================================================
   // VOCE, TIMER, SCHERMO ACCESO
   // =====================================================================
+  // Sintesi vocale. Accorgimenti per Safari/iPhone: voce scelta a mano, attesa dopo cancel(),
+  // testo spezzato in frasi, riferimenti tenuti vivi e un suono silenzioso che «sblocca» l'audio.
   const SPEECH_LANG = { it: 'it-IT', en: 'en-US', es: 'es-ES', fr: 'fr-FR', de: 'de-DE', pt: 'pt-PT' };
   let voices = [], speechKeep = [], speechGen = 0, silentAudio = null;
   function loadVoices() { try { voices = speechSynthesis.getVoices() || []; } catch (e) { voices = []; } }
@@ -406,14 +408,17 @@
       });
       try { speechSynthesis.resume(); } catch (e) { }
       speechKeep.forEach(u => speechSynthesis.speak(u));
+      // se dopo un attimo non sta parlando, dillo invece di restare muti
       setTimeout(() => { if (gen === speechGen && !speechSynthesis.speaking && !speechSynthesis.pending) toast('La voce non è partita: alza il volume, togli il silenzioso e riprova.'); }, 1800);
     };
-    if (busy) { speechSynthesis.cancel(); setTimeout(go, 120); } else go();
+    if (busy) { speechSynthesis.cancel(); setTimeout(go, 120); } else go(); // Safari perde la frase se parte subito dopo cancel()
   }
   const stopSpeaking = () => { speechGen++; speechKeep = []; if ('speechSynthesis' in window) speechSynthesis.cancel(); };
 
   const Timers = {
-    list: {}, audio: null, tick: null,
+    list: {}, // id → { end, left, label, running }
+    audio: null,
+    tick: null,
     start(id, secs, label) {
       const t = this.list[id] || {};
       t.label = label; t.end = Date.now() + secs * 1000; t.running = true; t.left = secs;
@@ -461,6 +466,7 @@
       alertBox('⏰ Tempo scaduto', label);
     }
   };
+  // quando torni nell'app dopo averla lasciata, i timer si aggiornano subito
   document.addEventListener('visibilitychange', () => { if (!document.hidden && Object.keys(Timers.list).length) Timers.loop(); });
 
   let wakeLock = null;
@@ -538,11 +544,13 @@
   };
 
   window.addEventListener('popstate', () => {
+    // il tasto indietro (o il gesto) toglie una schermata
     if (document.querySelector('.overlay')) { document.querySelectorAll('.overlay').forEach(o => o.remove()); history.pushState({ d: nav.stack.length }, ''); return; }
     if (nav.stack.length > 1) nav.popNow();
     else if (nav.tab !== 0) nav.setTab(0);
   });
 
+  // ---- eventi delegati: data-a = metodo della schermata in primo piano ----
   let longFired = false, longTimer = null;
   function dispatch(el, attr, ev) {
     const s = nav.top(), name = el.getAttribute(attr);
@@ -572,6 +580,7 @@
   });
   document.addEventListener('contextmenu', e => { if (e.target.closest('[data-long]')) e.preventDefault(); });
 
+  /** Azioni disponibili da tutte le schermate. */
   const Global = {
     newRecipeGlobal() { newRecipe(); },
     samples() { const n = addSamples(); toast(n + (n === 1 ? ' ricetta aggiunta' : ' ricette aggiunte') + ' a «Le mie ricette»'); const t = nav.top(); if (t) t.refresh(); },
@@ -598,6 +607,7 @@
     }
   };
 
+  /** Apre una ricetta; se è un'idea dal web prepara prima la ricetta completa. */
   async function openRecipe(r) {
     const c = cached(r);
     if (!Ai.isStub(c)) { nav.push(new RecipeScreen(c)); return; }
@@ -753,6 +763,7 @@
       h += `<div class="btns">${btn('Cucina', 'play', 'pri', 'cook')}${btn('Spesa', 'cart', '', 'shop')}${btn('Piano', 'calendar', '', 'plan')}</div>`;
       h += `<div class="inline-bar">${btn('Modifica completa', 'edit', '', 'editRecipe')}${this.inlineDirty ? `${btn('Salva come mia', 'check', 'pri', 'saveInlineAsMine')}${btn('Ripristina', 'refresh', '', 'resetInline')}` : ''}</div>`;
 
+      // versione leggera
       const kb = RF.perServing(orig).kcal, ka = RF.perServing(lr.light).kcal;
       h += `<div class="card" id="lightCard"><div class="row"><span class="acc">${ic('leaf')}</span><div class="grow"><h3>Versione leggera e completa</h3><div class="muted mt4">${lr.changes.length ? `${kcal(kb)} → ${kcal(ka)} kcal a porzione · ${lr.changes.length} ${lr.changes.length === 1 ? 'modifica' : 'modifiche'}` : 'È già una ricetta equilibrata'}</div></div>${toggle(this.light, 'setLight')}</div>`;
       if (this.light) {
@@ -768,8 +779,8 @@
       h += this.nutrition(r);
       if (this.dough) h += this.doughPanel();
       else if (this.moldBase > 0) h += this.moldPanel();
-      else h += this.enableDoughCard();
 
+      // ingredienti
       h += `<div class="card"><div class="row"><h2 class="grow">Ingredienti</h2>${this.dough ? '' : stepper(this.servings + ' porz.', 'servMinus', 'servPlus')}</div>`;
       r.ingredients.forEach((i, idx) => {
         const have = RF.pantryHas(S.fridge, S.staples, i.name);
@@ -780,6 +791,7 @@
       else h += `<p class="muted">Tocca un ingrediente per cambiare dose o rimuoverlo.</p>`;
       h += '</div>';
 
+      // passaggi
       h += `<div class="card"><h2>Procedimento</h2>`;
       r.steps.forEach((st, k) => {
         const kind = RF.classify(st), secs = RF.seconds(st);
@@ -788,6 +800,7 @@
       });
       h += `<div class="inline-bar">${btn('Aggiungi passo', 'plus', '', 'addStepInline')}${btn('Avvia la modalità cucina', 'play', 'pri', 'cook')}</div></div>`;
 
+      // fonti
       if (r.notes || r.sources.length) {
         h += `<div class="card"><h2>Dal web</h2>${r.notes ? `<p>${esc(r.notes)}</p>` : ''}`;
         if (r.sources.length) h += `<div class="small mt12">Fonti consultate</div>` + r.sources.map(s => {
@@ -797,11 +810,13 @@
         h += '</div>';
       }
 
+      // coach
       h += `<div class="card"><div class="row"><span class="acc">${ic('magic')}</span><h3 class="grow">Coach AI: rendila più sana</h3></div>`;
       if (this.coachText == null) h += `<p class="muted">Sostituzioni ragionate, aggiunte per completare il pasto e consigli di cottura, scritti da Gemini per questa ricetta.</p><div class="mt12">${btn('Chiedi al coach', null, 'block', 'coach')}</div>`;
       else h += this.coachHtml(this.coachText);
       h += '</div>';
 
+      // note personali
       h += `<div class="card"><h2>Le tue note</h2><div class="stars">${[1, 2, 3, 4, 5].map(v => `<button class="ibtn ${v <= p.rating ? 'on' : ''}" data-a="rate" data-x="${v}">${ic(v <= p.rating ? 'starFill' : 'star')}</button>`).join('')}</div>`
         + `<div class="note ${p.notes ? '' : 'empty'}" data-a="editNotes">${esc(p.notes || 'Tocca per scrivere un appunto (es. «meno sale», «20 minuti in più in forno»)')}</div>`
         + `<div class="btns">${btn('L\'ho cucinata', 'check', '', 'cooked')}${btn(p.photo ? 'Cambia foto' : 'Foto', 'camera', '', 'photo')}</div></div>`;
@@ -852,11 +867,7 @@
         + row('Ore a temperatura ambiente', D.hrs(d.ambHours), 'ambHours') + row('Ore in frigo', D.hrs(d.fridgeHours), 'fridgeHours')
         + row('Temperatura della stanza', D.g(d.temp) + ' °C', 'temp') + row('Inforno alle', String(d.bakeHour).padStart(2, '0') + ':00', 'bakeHour');
       h += `<div class="mt8">${toggleRow('Lievito secco', 'Al posto del lievito di birra fresco (un terzo della dose)', d.dryYeast, 'dDry')}</div>`;
-      h += `<div class="res"><b>Farina ${D.g(D.flour(d))} g · Acqua ${D.g(D.water(d))} g · Lievito ${D.g(D.yeastG(d))} g · Sale ${D.g(D.saltG(d))} g${D.oilG(d) > 0 ? ' · Olio ' + D.g(D.oilG(d)) + ' g' : ''}</b><div class="acc mt4" style="font-weight:700">${esc(D.schedule(d))}</div></div>`;
-      if (!(this.base.kind && this.base.kind.startsWith('dough:'))) {
-        h += `<div class="mt12">${btn('Togli parametri impasto', 'trash', 'txt block', 'disableDough')}</div>`;
-      }
-      h += '</div>';
+      h += `<div class="res"><b>Farina ${D.g(D.flour(d))} g · Acqua ${D.g(D.water(d))} g · Lievito ${D.g(D.yeastG(d))} g · Sale ${D.g(D.saltG(d))} g${D.oilG(d) > 0 ? ' · Olio ' + D.g(D.oilG(d)) + ' g' : ''}</b><div class="acc mt4" style="font-weight:700">${esc(D.schedule(d))}</div></div></div>`;
       return h;
     }
     moldPanel() {
@@ -864,41 +875,6 @@
       return `<div class="card"><h2>Dimensione dello stampo</h2><p class="muted">La ricetta è pensata per uno stampo da ${this.moldBase} cm: scegli il tuo e le dosi si adattano alla superficie.</p>`
         + `<div class="flow mt12">${RF.MOLDS.map(d => chip('Ø ' + d + ' cm', d === this.mold, 'setMold', d)).join('')}</div>`
         + `<p class="${this.mold === this.moldBase ? 'muted' : 'acc'}" style="font-weight:700">Dosi × ${k.toFixed(2).replace('.', ',')} rispetto alla ricetta originale</p></div>`;
-    }
-    /** Card che compare sulle ricette NON nate come impasto: permette di attivare il pannello parametri. */
-    enableDoughCard() {
-      return `<div class="card"><div class="row"><span class="acc">${ic('scale')}</span><h3 class="grow">Parametri impasto</h3></div>`
-        + `<p class="muted">Se questa ricetta è un impasto (pane, pizza, focaccia, brioche…), attiva i parametri: potrai regolare idratazione, sale, olio, lievito e tempi, e le dosi si ricalcolano da sole.</p>`
-        + `<div class="mt12">${btn('Attiva parametri impasto', 'plus', 'block', 'enableDough')}</div></div>`;
-    }
-    /** Sceglie uno stile sensato in base a titolo/tag/descrizione, altrimenti NAPOLETANA. */
-    _guessDoughStyle() {
-      const styles = Object.keys(RF.STYLES || {});
-      if (!styles.length) return null;
-      const hay = ((this.base.title || '') + ' ' + (this.base.description || '') + ' ' + (this.base.tags || []).join(' ')).toLowerCase();
-      const find = (...kw) => styles.find(k => {
-        const label = (RF.STYLES[k].label || '').toLowerCase();
-        return kw.some(w => label.includes(w) || k.toLowerCase().includes(w));
-      });
-      if (/\b(pane|pagnotta|baguette|ciabatta|panini|filone)\b/.test(hay)) return find('pane') || null;
-      if (/\b(focaccia|teglia|pizzetta|schiacciata)\b/.test(hay)) return find('teglia', 'focaccia') || null;
-      if (/\b(brioche|cornetto|croissant|dolce lievitato)\b/.test(hay)) return find('brioche', 'dolce') || null;
-      if (/\bpizza\b/.test(hay)) return find('napoletana', 'pizza', 'romana') || null;
-      return null;
-    }
-    enableDough() {
-      if (!RF.Dough || !RF.STYLES) { toast('Parametri impasto non disponibili'); return; }
-      const style = this._guessDoughStyle() || (RF.STYLES.NAPOLETANA ? 'NAPOLETANA' : Object.keys(RF.STYLES)[0]);
-      this.dough = RF.doughPreset(style);
-      this.servings = this.dough.count;
-      this.refresh();
-      toast(`Parametri impasto attivati (${RF.STYLES[style].label})`);
-    }
-    disableDough() {
-      this.dough = null;
-      this.servings = this.base.servings || 2;
-      this.refresh();
-      toast('Parametri impasto disattivati');
     }
     // ---- azioni ----
     setLight(x, el) { this.light = el.checked; this.refresh(); }
@@ -1399,7 +1375,7 @@
         + f('Procedimento, un passaggio per paragrafo', `<textarea class="input" id="e-steps" rows="9" placeholder="Lascia una riga vuota tra un passaggio e l'altro.&#10;Scrivi i tempi (es. 10 minuti): diventano timer.">${esc(r.steps.map(s => s.replace(/\s*→ Versione leggera:.*$/, '')).join('\n\n'))}</textarea>`)
         + `<div class="mt16">${btn('Salva la ricetta', 'check', 'pri block', 'save')}</div>`;
     }
-    keep() {
+    keep() { // salva quello che hai scritto prima di ridisegnare
       const v = id => ($('#' + id) || {}).value;
       if ($('#e-title')) Object.assign(this.r, { title: v('e-title'), description: v('e-desc'), minutes: parseInt(v('e-min'), 10) || 0 });
       this.draft = { tags: v('e-tags'), ings: v('e-ings'), steps: v('e-steps') };
@@ -1425,6 +1401,7 @@
       if (!n.source || n.source.startsWith('Idea')) n.source = 'Le mie ricette';
       saveMine(n);
       toast('Ricetta salvata');
+      // torno indietro e apro la ricetta aggiornata (sostituendo il vecchio dettaglio)
       nav.stack.pop();
       if (nav.top() instanceof RecipeScreen) nav.stack.pop();
       nav.stack.push(new RecipeScreen(n));
@@ -1528,6 +1505,7 @@
     history.replaceState({ d: 1 }, '');
     nav.setTab(0);
     $('#view').addEventListener('scroll', () => $('#bar').classList.toggle('scrolled', $('#view').scrollTop > 4), { passive: true });
+    // testo condiviso da un'altra app (Android: "Condividi → RecipeFlow")
     const params = new URLSearchParams(location.search);
     const shared = [params.get('title'), params.get('text'), params.get('url')].filter(Boolean).join('\n');
     if (shared) { history.replaceState({ d: 1 }, '', location.pathname); nav.setTab(4); nav.push(new ImportScreen(shared)); }
