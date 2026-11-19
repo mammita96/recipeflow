@@ -1509,4 +1509,31 @@
           confirmBox('Importare il backup?', 'Sostituisce ricette, piano, spesa e note di questo telefono.', 'Importa', () => {
             const key = S.geminiKey; Object.assign(S, d); if (!S.geminiKey) S.geminiKey = key; save(); load(); applyTheme(); nav.drawTabs(); this.refresh(); toast('Backup importato');
           });
-        } catch (e) { alertBox('File non valido', 'Scegli un file di backup
+        } catch (e) { alertBox('File non valido', 'Scegli un file di backup di RecipeFlow (.json).'); }
+      };
+      inp.click();
+    }
+  }
+
+  const isStandalone = () => (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+
+  // =====================================================================
+  // AVVIO
+  // =====================================================================
+  async function boot() {
+    load();
+    applyTheme();
+    if (window.matchMedia) matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (S.appearance === 'system') { applyTheme(); nav.draw(true); } });
+    try { builtin = (await (await fetch('recipes.json')).json()).map(RF.normRecipe); } catch (e) { builtin = []; }
+    history.replaceState({ d: 1 }, '');
+    nav.setTab(0);
+    $('#view').addEventListener('scroll', () => $('#bar').classList.toggle('scrolled', $('#view').scrollTop > 4), { passive: true });
+    const params = new URLSearchParams(location.search);
+    const shared = [params.get('title'), params.get('text'), params.get('url')].filter(Boolean).join('\n');
+    if (shared) { history.replaceState({ d: 1 }, '', location.pathname); nav.setTab(4); nav.push(new ImportScreen(shared)); }
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
+  }
+  window.RecipeFlow = { S, nav, save, RecipeScreen }; // per prove
+  boot();
+})();
