@@ -210,6 +210,39 @@
       return items;
     }
 
+    /** Voce di Google: restituisce un file audio WAV con il testo letto. */
+    async tts(text) {
+      if (!this.key) throw new Error('Serve la chiave di Gemini (Altro → Impostazioni).');
+      const models = ['gemini-2.5-flash-preview-tts', 'gemini-2.5-flash-tts'];
+      let last = null;
+      for (const m of models) {
+        let resp;
+        try {
+          resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.key },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: 'Leggi in italiano, con voce calma e chiara: ' + text }] }],
+              generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } } }
+            })
+          });
+        } catch (e) { throw new Error('Sembra che non ci sia connessione a internet.'); }
+        const body = await resp.text();
+        if (resp.status === 404) { last = new Error('Modello vocale non disponibile'); continue; }
+        if (resp.status === 429) throw new Error('Limite giornaliero gratuito della voce di Google raggiunto: riprova domani o usa la voce del telefono.');
+        if (resp.status !== 200) { let msg = body.slice(0, 160); try { msg = JSON.parse(body).error.message; } catch (e) { } throw new Error('Voce di Google ' + resp.status + ': ' + msg); }
+        const part = (((JSON.parse(body).candidates || [])[0] || {}).content || { parts: [] }).parts.find(p => p.inlineData);
+        if (!part) throw new Error('La voce di Google non ha restituito audio.');
+        const rate = +((/rate=(\d+)/.exec(part.inlineData.mimeType || '') || [])[1] || 24000);
+        const pcm = Uint8Array.from(atob(part.inlineData.data), c => c.charCodeAt(0));
+        const h = new DataView(new ArrayBuffer(44));
+        const w = (o, t) => [...t].forEach((c, i) => h.setUint8(o + i, c.charCodeAt(0)));
+        w(0, 'RIFF'); h.setUint32(4, 36 + pcm.length, true); w(8, 'WAVEfmt '); h.setUint32(16, 16, true); h.setUint16(20, 1, true); h.setUint16(22, 1, true);
+        h.setUint32(24, rate, true); h.setUint32(28, rate * 2, true); h.setUint16(32, 2, true); h.setUint16(34, 16, true); w(36, 'data'); h.setUint32(40, pcm.length, true);
+        return new Blob([h.buffer, pcm], { type: 'audio/wav' });
+      }
+      throw last || new Error('Voce di Google non disponibile');
+    }
+
     static describe(r) {
       let s = `Recipe: ${r.title} (${r.servings} servings)\n`;
       if (r.tags.length) s += 'Tags: ' + r.tags.join(', ') + '\n';

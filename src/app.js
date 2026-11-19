@@ -354,91 +354,117 @@
   // VOCE, TIMER, SCHERMO ACCESO
   // =====================================================================
   /**
-   * Lettura ad alta voce. Su iPhone la voce parte solo se "sbloccata" da un tocco e, con il tasto silenzioso attivo,
-   * resta muta: per questo imposto la sessione audio in modalità "riproduzione", scelgo una voce italiana installata,
-   * divido il testo in frasi brevi e non riparto subito dopo un cancel (iOS a volte scarta la frase).
+   * Lettura ad alta voce, con tre modi (sceglibili e provabili in Impostazioni → Voce):
+   *  A "telefono"   voce di sistema, chiamata nel modo più semplice possibile, dentro il tocco;
+   *  B "telefono+"  come A ma con la sessione audio in "riproduzione" (ignora il tasto silenzioso);
+   *  C "google"     voce di Google Gemini: l'audio arriva da internet e si ascolta come un file (funziona anche
+   *                 dove la voce di sistema resta muta, ad esempio in alcune versioni di iOS per le app sulla Home).
+   * In automatico uso A e, se entro 2 secondi non parte, passo da solo a C (se c'è la chiave).
    */
   const LANGCODE = () => ({ it: 'it-IT', en: 'en-US', es: 'es-ES', fr: 'fr-FR', de: 'de-DE', pt: 'pt-PT' }[S.lang] || 'it-IT');
+  const SILENT_WAV = (() => {
+    const rate = 8000, n = 400, buf = new ArrayBuffer(44 + n * 2), d = new DataView(buf);
+    const w = (o, t) => [...t].forEach((c, i) => d.setUint8(o + i, c.charCodeAt(0)));
+    w(0, 'RIFF'); d.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
+    d.setUint32(24, rate, true); d.setUint32(28, rate * 2, true); d.setUint16(32, 2, true); d.setUint16(34, 16, true); w(36, 'data'); d.setUint32(40, n * 2, true);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  })();
+  const ttsCache = new Map();
+
   const Voice = {
-    ok: 'speechSynthesis' in window, voices: [], unlocked: false, queue: [], keep: null, watchdog: null, started: false,
+    ok: 'speechSynthesis' in window, voices: [], log: [], keep: null, queue: [], started: false, watchdog: null, audio: null, playing: false, token: 0,
     init() {
       if (!this.ok) return;
       const load = () => { try { this.voices = speechSynthesis.getVoices() || []; } catch (e) { } };
       load();
       try { speechSynthesis.addEventListener('voiceschanged', load); } catch (e) { speechSynthesis.onvoiceschanged = load; }
-      const first = () => { this.unlock(); };
-      document.addEventListener('touchend', first, { once: true, capture: true });
-      document.addEventListener('click', first, { once: true, capture: true });
     },
+    note(m) { this.log.push(new Date().toLocaleTimeString('it-IT') + ' ' + m); if (this.log.length > 8) this.log.shift(); const el = $('#voiceLog'); if (el) el.textContent = this.log.join('\n'); },
+    mode() { return S.voiceMode || 'auto'; },
     pick() {
       const code = LANGCODE().toLowerCase(), two = code.slice(0, 2);
-      const all = this.voices.length ? this.voices : (speechSynthesis.getVoices() || []);
+      const all = this.voices.length ? this.voices : (this.ok ? speechSynthesis.getVoices() || [] : []);
       const same = all.filter(v => (v.lang || '').replace('_', '-').toLowerCase().startsWith(two));
-      return same.find(v => v.lang.replace('_', '-').toLowerCase() === code && /enhanced|premium|alice|federica|luca/i.test(v.name))
-        || same.find(v => v.lang.replace('_', '-').toLowerCase() === code && v.localService)
-        || same.find(v => v.localService) || same[0] || null;
+      return same.find(v => v.lang.replace('_', '-').toLowerCase() === code && v.localService) || same[0] || null;
     },
-    /** Da chiamare dentro un tocco: prepara audio e voce. */
-    unlock() {
-      if (!this.ok || this.unlocked) return;
-      this.unlocked = true;
-      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { }
-      try { // un attimo di silenzio con un elemento audio porta l'iPhone in modalità "riproduzione"
-        const rate = 8000, n = 800, buf = new ArrayBuffer(44 + n * 2), d = new DataView(buf);
-        const w = (o, t) => [...t].forEach((c, i) => d.setUint8(o + i, c.charCodeAt(0)));
-        w(0, 'RIFF'); d.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
-        d.setUint32(24, rate, true); d.setUint32(28, rate * 2, true); d.setUint16(32, 2, true); d.setUint16(34, 16, true); w(36, 'data'); d.setUint32(40, n * 2, true);
-        const a = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
-        a.setAttribute('playsinline', ''); a.volume = 0.01;
-        a.play().catch(() => { });
-      } catch (e) { }
+    clean(text) {
+      return String(text).replace(/°\s*C/g, ' gradi').replace(/→/g, '. ').replace(/(\d+)\s*g\b/g, '$1 grammi').replace(/(\d+)\s*ml\b/g, '$1 millilitri')
+        .replace(/(\d+)\s*kg\b/g, '$1 chili').replace(/\bq\.b\./g, 'quanto basta').replace(/\s+/g, ' ').trim();
     },
-    speak(text) {
-      if (!this.ok) { toast('Il browser non supporta la lettura ad alta voce'); return; }
-      this.unlock();
-      const parts = String(text).replace(/\s+/g, ' ').match(/[^.!?;:]+[.!?;:]*/g) || [text];
-      const chunks = [];
-      for (const p of parts) {
-        let t = p.trim();
-        while (t.length > 180) { const cut = t.lastIndexOf(',', 180) > 60 ? t.lastIndexOf(',', 180) + 1 : 180; chunks.push(t.slice(0, cut)); t = t.slice(cut).trim(); }
-        if (t) chunks.push(t);
+    /** Da chiamare dentro il tocco. */
+    speak(text, forceMode) {
+      text = this.clean(text);
+      const m = forceMode || this.mode();
+      this.stop();
+      const my = ++this.token;
+      if (m === 'google') return this.google(text, my);
+      if (!this.ok) { if (S.geminiKey) return this.google(text, my); toast('Questo browser non ha la sintesi vocale'); return; }
+      if (m === 'phone+') {
+        try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { }
       }
-      const busy = speechSynthesis.speaking || speechSynthesis.pending;
-      if (busy) speechSynthesis.cancel();
-      this.queue = chunks;
-      this.started = false;
-      // la prima frase parte subito, dentro il tocco (iPhone lo richiede); dopo un cancel serve un attimo di pausa
-      if (busy) setTimeout(() => this.next(), 250); else this.next();
-      clearTimeout(this.watchdog);
-      this.watchdog = setTimeout(() => {
-        if (!this.started) {
+      this.system(text, my);
+      if (m === 'auto') {
+        clearTimeout(this.watchdog);
+        this.watchdog = setTimeout(() => {
+          if (my !== this.token || this.started) return;
+          this.note('voce del telefono muta dopo 2 s');
           try { speechSynthesis.cancel(); } catch (e) { }
-          toast('La voce non parte: alza il volume (tasti laterali) e prova di nuovo. Vedi Altro → Impostazioni → Prova la voce');
-        }
-      }, 3000);
+          if (S.geminiKey) { toast('La voce del telefono non parte: uso la voce di Google'); this.google(text, my, true); }
+          else toast('La voce non parte: prova Altro → Impostazioni → Voce');
+        }, 2000);
+      }
     },
-    next() {
-      const t = this.queue.shift();
-      if (!t) return;
-      const u = new SpeechSynthesisUtterance(t);
-      u.lang = LANGCODE();
-      const v = this.pick();
-      if (v) u.voice = v;
-      u.rate = 0.98; u.pitch = 1; u.volume = 1;
-      u.onstart = () => { this.started = true; };
-      u.onend = () => this.next();
-      u.onerror = e => { if (e.error !== 'interrupted' && e.error !== 'canceled') this.next(); };
-      this.keep = u; // tengo un riferimento: Safari a volte interrompe le frasi "dimenticate"
-      try { speechSynthesis.resume(); } catch (e) { }
-      speechSynthesis.speak(u);
+    system(text, my) {
+      const chunks = (text.match(/[^.!?;:]+[.!?;:]*/g) || [text]).map(t => t.trim()).filter(Boolean);
+      this.queue = chunks; this.started = false;
+      const next = () => {
+        if (my !== this.token) return;
+        const t = this.queue.shift(); if (!t) return;
+        const u = new SpeechSynthesisUtterance(t);
+        u.lang = LANGCODE();
+        const v = this.pick(); if (v) u.voice = v;
+        u.onstart = () => { this.started = true; this.note('voce del telefono: parte (' + (v ? v.name : 'predefinita') + ')'); };
+        u.onend = () => next();
+        u.onerror = e => { this.note('voce del telefono: errore ' + e.error); if (e.error !== 'interrupted' && e.error !== 'canceled') next(); };
+        this.keep = u;
+        speechSynthesis.speak(u);
+      };
+      next();
+    },
+    /** Voce di Google: scarico l'audio e lo riproduco con un elemento audio sbloccato dal tocco. */
+    async google(text, my, fromAuto) {
+      if (!S.geminiKey) { needKey(); return; }
+      if (!this.audio) { this.audio = new Audio(); this.audio.setAttribute('playsinline', ''); this.audio.preload = 'auto'; }
+      const a = this.audio;
+      if (!fromAuto) { try { a.src = SILENT_WAV; a.play().catch(() => { }); } catch (e) { } } // sblocco dentro il tocco
+      try {
+        let url = ttsCache.get(text);
+        if (!url) {
+          toast('Preparo la voce…');
+          const blob = await ai().tts(text);
+          url = URL.createObjectURL(blob);
+          ttsCache.set(text, url);
+        }
+        if (my !== this.token) return;
+        a.src = url;
+        await a.play();
+        this.note('voce di Google: parte');
+      } catch (e) {
+        this.note('voce di Google: ' + (e.message || e.name));
+        if (my === this.token) alertBox('Voce di Google non disponibile', (e.message || String(e)) + (e.name === 'NotAllowedError' ? '\n\nTocca di nuovo «Leggi ad alta voce».' : ''));
+      }
     },
     info() {
-      if (!this.ok) return 'Questo browser non ha la sintesi vocale.';
+      if (!this.ok) return 'Sintesi vocale del telefono non disponibile in questo browser.';
       const all = speechSynthesis.getVoices() || [], v = this.pick();
       const it = all.filter(x => (x.lang || '').toLowerCase().startsWith(LANGCODE().slice(0, 2).toLowerCase()));
-      return `${all.length} voci installate, ${it.length} nella lingua scelta. ${v ? 'Uso: ' + v.name + ' (' + v.lang + ')' : 'Nessuna voce nella lingua scelta: uso quella predefinita.'}`;
+      return `${all.length} voci nel telefono, ${it.length} in italiano. ${v ? 'Voce scelta: ' + v.name : 'Nessuna voce italiana trovata.'} · App ${isStandalone() ? 'dalla Home' : 'in Safari'}.`;
     },
-    stop() { this.queue = []; clearTimeout(this.watchdog); if (this.ok) try { speechSynthesis.cancel(); } catch (e) { } }
+    stop() {
+      this.token++; this.queue = []; clearTimeout(this.watchdog);
+      if (this.ok) try { if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel(); } catch (e) { }
+      if (this.audio) try { this.audio.pause(); } catch (e) { }
+    }
   };
   const speak = text => Voice.speak(text);
   const stopSpeaking = () => Voice.stop();
@@ -1155,7 +1181,7 @@
     go(s) { this.step = s; this.refresh(); $('#view').scrollTop = 0; if (this.voice) this.say(); }
     next() { if (this.step < this.r.steps.length - 1) this.go(this.step + 1); }
     prev() { if (this.step > 0) this.go(this.step - 1); }
-    say() { speak(`Passo ${this.step + 1}. ` + this.r.steps[this.step].replace(/°\s*C/g, ' gradi').replace(/→/g, '. ').replace(/(\d+)\s*g\b/g, '$1 grammi').replace(/(\d+)\s*ml\b/g, '$1 millilitri')); }
+    say() { speak(`Passo ${this.step + 1}. ` + this.r.steps[this.step]); }
     toggleVoice() { this.voice = !this.voice; if (this.voice) this.say(); else stopSpeaking(); toast(this.voice ? 'Lettura ad alta voce attiva' : 'Lettura disattivata'); this.rebuild(); }
     tStart(id) {
       id = +id;
@@ -1419,7 +1445,7 @@
       return `<div class="row" style="margin-top:-14px">${stat(S.imported.length, 'ricette tue')}${stat(S.favorites.length, 'preferite')}${stat(cooked, 'piatti cucinati')}</div>`
         + `<div class="card menu" style="padding:6px">${item('book', 'Le mie ricette', 'Scrivi, modifica e organizza le tue ricette', 'mine')}${item('edit', 'Nuova ricetta', 'Con calcolo automatico di calorie e reparti', 'newOne')}`
         + `${item('copy', 'Importa da un testo', 'Didascalie, trascrizioni, pagine web', 'importText')}${item('heart', 'Preferiti', S.favorites.length ? S.favorites.length + ' ricette' : 'Ancora nessuno', 'favs')}${item('gear', 'Impostazioni', 'Gemini, lingua, tema, famiglia', 'settings')}</div>`
-        + `<div class="card"><div class="row"><img src="icons/icon-192.png" alt="" style="width:48px;height:48px;border-radius:12px"><div class="grow"><h3>RecipeFlow</h3><div class="muted mt4">Web app · versione 1.2 · di Arturo Clemente</div></div></div>`
+        + `<div class="card"><div class="row"><img src="icons/icon-192.png" alt="" style="width:48px;height:48px;border-radius:12px"><div class="grow"><h3>RecipeFlow</h3><div class="muted mt4">Web app · versione 1.3 · di Arturo Clemente</div></div></div>`
         + `<p class="muted">Ricette dal web con Google Gemini (piano gratuito), versione leggera calcolata sul telefono, impasti con parametri, piano settimanale e spesa. I dati restano su questo telefono. I valori nutrizionali sono stime da tabelle medie e non sostituiscono il parere di un nutrizionista.</p>`
         + (isStandalone() ? '' : `<div class="res"><b>Installala sul telefono</b><div class="muted mt4">iPhone: in Safari tocca Condividi → «Aggiungi alla schermata Home». Android: menu ⋮ di Chrome → «Installa app».</div></div>`) + '</div>';
     }
@@ -1573,8 +1599,15 @@
         + `<div class="small mt16">Tema</div><div class="flow mt8">${[['system', 'Come il telefono'], ['light', 'Chiaro'], ['dark', 'Scuro']].map(([k, l]) => chip(l, k === S.appearance, 'setMode', k)).join('')}</div></div>`;
       h += `<div class="card"><h2>In cucina</h2><div class="row mt12"><div class="grow"><h3>Persone in casa</h3><div class="muted mt4">Porzioni predefinite del piano settimanale</div></div>${stepper(String(S.household), 'hMinus', 'hPlus')}</div>`
         + `<div class="mt16">${toggleRow('Leggi i passaggi ad alta voce', 'In modalità cucina, appena cambi passaggio', S.speakSteps, 'setSpeak')}</div>`
-        + `<div class="mt12">${btn('Prova la voce', 'speaker', 'block', 'testVoice')}</div><p class="muted" id="voiceInfo">${esc(Voice.info())}</p>`
-        + `<p class="muted">Se non senti nulla: alza il volume con i tasti laterali mentre parla; su iPhone controlla Impostazioni → Accessibilità → Contenuti letti → Voci → Italiano e scarica una voce.</p></div>`;
+        + '</div>';
+      const vm = S.voiceMode || 'auto';
+      h += `<div class="card" id="voiceCard"><div class="row"><span class="acc">${ic('speaker')}</span><h2 class="grow">Voce</h2></div>`
+        + `<p class="muted">Se la lettura non si sente, prova i tre modi qui sotto e tieni quello che funziona. Alza il volume con i tasti laterali.</p>`
+        + `<div class="flow mt8">${[['auto', 'Automatica'], ['phone', 'Telefono'], ['phone+', 'Telefono (anche in silenzioso)'], ['google', 'Google (internet)']].map(([k, l]) => chip(l, k === vm, 'setVoiceMode', k)).join('')}</div>`
+        + `<div class="btns">${btn('Prova telefono', 'play', '', 'tryVoice', 'phone')}${btn('Prova Google', 'play', '', 'tryVoice', 'google')}</div>`
+        + `<div class="mt8">${btn('Prova telefono (anche in silenzioso)', 'play', 'block', 'tryVoice', 'phone+')}</div>`
+        + `<p class="muted mt12" id="voiceInfo">${esc(Voice.info())}</p><pre class="muted" id="voiceLog" style="white-space:pre-wrap;font-size:12px;margin:6px 0 0">${esc(Voice.log.join('\n'))}</pre>`
+        + `<p class="muted">«Google» usa la tua chiave Gemini: ha un limite giornaliero gratuito, le frasi già lette restano in memoria finché l'app è aperta. Su iPhone, se la voce del telefono non c'è: Impostazioni → Accessibilità → Contenuti letti → Voci → Italiano.</p></div>`;
       h += `<div class="card"><h2>Ricettario e dati</h2><p class="muted">${visibleBuiltin().length} ricette nel ricettario · ${S.imported.length} tue · ${Object.keys(S.webCache).length} cercate sul web</p>`
         + `<div class="mt12">${btn(`Ingredienti salvati (${Object.keys(S.foods).length})`, 'list', 'block', 'foods')}</div>`
         + (Object.keys(S.webCache).length ? `<div class="mt12">${btn('Dimentica le ricette cercate sul web', 'trash', 'danger block', 'forgetWeb')}</div>` : '')
@@ -1595,7 +1628,16 @@
     hMinus() { if (S.household > 1) { S.household--; save(); this.refresh(); } }
     hPlus() { if (S.household < 12) { S.household++; save(); this.refresh(); } }
     setSpeak(x, el) { S.speakSteps = el.checked; save(); }
-    testVoice() { speak('Ciao! Sono la voce di RecipeFlow. Se mi senti, la lettura dei passaggi funziona.'); setTimeout(() => { const i = $('#voiceInfo'); if (i) i.textContent = Voice.info(); }, 600); }
+    tryVoice(m) {
+      Voice.note('prova: ' + m);
+      Voice.speak('Ciao! Sono la voce di RecipeFlow. Se mi senti, scegli questo modo.', m);
+      setTimeout(() => {
+        const i = $('#voiceInfo'); if (i) i.textContent = Voice.info();
+        if (m === 'google' && !S.geminiKey) return;
+        confirmBox('Hai sentito la voce?', 'Se sì, la uso sempre per la lettura delle ricette.', 'Sì, usala', () => { S.voiceMode = m; save(); this.refresh(); toast('Voce impostata'); });
+      }, m === 'google' ? 6000 : 3500);
+    }
+    setVoiceMode(m) { S.voiceMode = m; save(); this.refresh(); }
     foods() { nav.push(new FoodsScreen()); }
     forgetWeb() { confirmBox('Dimenticare le ricette dal web?', 'Le preferite e i pasti già nel piano restano.', 'OK', () => { S.webCache = {}; S.history = []; save(); this.refresh(); }); }
     exportData() {
