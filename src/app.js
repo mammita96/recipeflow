@@ -11,9 +11,9 @@
   // =====================================================================
   // DATI (salvati nel telefono: localStorage + IndexedDB per le foto)
   // =====================================================================
-  const KEY = 'recipeflow.v1';
+  const KEY = 'recipeflow.v2';
   const S = {
-    favorites: [], imported: [], shopping: [], plan: {}, fridge: [], staples: true, household: 2, personal: {}, webCache: {}, hidden: [], history: [],
+    favorites: [], imported: [], shopping: [], plan: {}, fridge: [], staples: true, household: 2, personal: {}, webCache: {}, history: [],
     geminiKey: '', geminiModel: RF.DEFAULT_MODEL, lang: 'it', accent: 'Menta', appearance: 'system', speakSteps: false, speakRate: 1
   };
   let builtin = [];
@@ -39,7 +39,6 @@
   function addSamples() {
     let n = 0;
     for (const r of builtin) if (!find(S.imported, r.id)) { S.imported.push(RF.copy(r)); n++; }
-    S.hidden = [];
     save();
     return n;
   }
