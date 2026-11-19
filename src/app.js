@@ -14,7 +14,7 @@
   const KEY = 'recipeflow.v1';
   const S = {
     favorites: [], imported: [], shopping: [], plan: {}, fridge: [], staples: true, household: 2, personal: {}, webCache: {}, hidden: [], history: [],
-    geminiKey: '', geminiModel: RF.DEFAULT_MODEL, lang: 'it', accent: 'Menta', appearance: 'system', speakSteps: false
+    geminiKey: '', geminiModel: RF.DEFAULT_MODEL, lang: 'it', accent: 'Menta', appearance: 'system', speakSteps: false, speakRate: 1
   };
   let builtin = [];
 
@@ -33,7 +33,19 @@
   const ai = () => new Ai(S.geminiKey, S.geminiModel, S.lang);
   const baseId = id => (id || '').replace('-light', '');
   const find = (l, id) => l.find(r => r.id === id);
-  const visibleBuiltin = () => builtin.filter(r => !S.hidden.includes(r.id));
+  // Il ricettario parte VUOTO: le ricette di esempio si aggiungono a mano e diventano «tue».
+  const visibleBuiltin = () => [];
+  const samplesLeft = () => builtin.filter(r => !find(S.imported, r.id)).length;
+  function addSamples() {
+    let n = 0;
+    for (const r of builtin) if (!find(S.imported, r.id)) { S.imported.push(RF.copy(r)); n++; }
+    S.hidden = [];
+    save();
+    return n;
+  }
+  function deleteAllMine() {
+    for (const r of S.imported.slice()) del(r);
+  }
   function localRecipes() {
     const out = S.imported.slice();
     for (const r of visibleBuiltin()) if (!find(out, r.id)) out.push(r);
@@ -68,7 +80,6 @@
     const id = baseId(r.id);
     const m = find(S.imported, id);
     if (m) { S.imported.splice(S.imported.indexOf(m), 1); const p = S.personal[id]; if (p && p.photo) Photos.remove(p.photo); delete S.personal[id]; }
-    if (isBuiltin(r) && !S.hidden.includes(id)) S.hidden.push(id);
     delete S.webCache[id];
     const f = find(S.favorites, id);
     if (f) S.favorites.splice(S.favorites.indexOf(f), 1);
@@ -335,15 +346,67 @@
   // =====================================================================
   // VOCE, TIMER, SCHERMO ACCESO
   // =====================================================================
-  function speak(text) {
-    if (!('speechSynthesis' in window)) { toast('Lettura ad alta voce non disponibile'); return; }
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = { it: 'it-IT', en: 'en-US', es: 'es-ES', fr: 'fr-FR', de: 'de-DE', pt: 'pt-PT' }[S.lang] || 'it-IT';
-    u.rate = 1;
-    speechSynthesis.speak(u);
+  // Sintesi vocale. Accorgimenti per Safari/iPhone: voce scelta a mano, attesa dopo cancel(),
+  // testo spezzato in frasi, riferimenti tenuti vivi e un suono silenzioso che «sblocca» l'audio.
+  const SPEECH_LANG = { it: 'it-IT', en: 'en-US', es: 'es-ES', fr: 'fr-FR', de: 'de-DE', pt: 'pt-PT' };
+  let voices = [], speechKeep = [], speechGen = 0, silentAudio = null;
+  function loadVoices() { try { voices = speechSynthesis.getVoices() || []; } catch (e) { voices = []; } }
+  if ('speechSynthesis' in window) {
+    loadVoices();
+    if (speechSynthesis.addEventListener) speechSynthesis.addEventListener('voiceschanged', loadVoices); else speechSynthesis.onvoiceschanged = loadVoices;
   }
-  const stopSpeaking = () => { if ('speechSynthesis' in window) speechSynthesis.cancel(); };
+  function pickVoice(lang) {
+    const l = lang.toLowerCase(), pre = l.slice(0, 2);
+    const norm = v => (v.lang || '').toLowerCase().replace('_', '-');
+    const exact = voices.filter(v => norm(v) === l), loose = voices.filter(v => norm(v).startsWith(pre));
+    const pool = exact.length ? exact : loose;
+    return pool.find(v => v.localService && /enhanced|premium|siri|migliorata/i.test(v.name)) || pool.find(v => v.localService) || pool[0] || null;
+  }
+  function unlockAudio() {
+    try {
+      if (!silentAudio) {
+        const n = 2205, b = new ArrayBuffer(44 + n * 2), d = new DataView(b), w = (o, t) => { for (let i = 0; i < t.length; i++) d.setUint8(o + i, t.charCodeAt(i)); };
+        w(0, 'RIFF'); d.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
+        d.setUint32(24, 22050, true); d.setUint32(28, 44100, true); d.setUint16(32, 2, true); d.setUint16(34, 16, true); w(36, 'data'); d.setUint32(40, n * 2, true);
+        silentAudio = new Audio(URL.createObjectURL(new Blob([b], { type: 'audio/wav' })));
+      }
+      silentAudio.currentTime = 0; const pr = silentAudio.play(); if (pr && pr.catch) pr.catch(() => { });
+    } catch (e) { }
+  }
+  const speakClean = t => (t || '').replace(/°\s*C/g, ' gradi').replace(/°/g, ' gradi').replace(/&/g, ' e ').replace(/%/g, ' per cento')
+    .replace(/[*#_]/g, ' ').replace(/[→–—]/g, ', ').replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\uFE0F]/gu, ' ').replace(/\s+/g, ' ').trim();
+  function speechChunks(t) {
+    const parts = t.match(/[^.!?;:]+[.!?;:]*\s*/g) || [t], out = [];
+    let cur = '';
+    for (const p of parts) { if ((cur + p).length > 170 && cur) { out.push(cur.trim()); cur = p; } else cur += p; }
+    if (cur.trim()) out.push(cur.trim());
+    return out;
+  }
+  function speak(text) {
+    if (!('speechSynthesis' in window)) { toast('Lettura ad alta voce non disponibile su questo browser'); return; }
+    const gen = ++speechGen, busy = speechSynthesis.speaking || speechSynthesis.pending;
+    unlockAudio();
+    const lang = SPEECH_LANG[S.lang] || 'it-IT';
+    const go = () => {
+      if (gen !== speechGen) return;
+      loadVoices();
+      const voice = pickVoice(lang);
+      if (!voice && voices.length) toast('Nessuna voce per questa lingua: iPhone → Impostazioni → Accessibilità → Contenuto letto → Voci');
+      speechKeep = speechChunks(speakClean(text)).map(c => {
+        const u = new SpeechSynthesisUtterance(c);
+        u.lang = lang; u.rate = S.speakRate || 1; u.volume = 1;
+        if (voice) u.voice = voice;
+        u.onerror = ev => { if (gen === speechGen && ev.error && !['canceled', 'interrupted'].includes(ev.error)) toast('La voce non parte (' + ev.error + '). Controlla volume e tasto silenzioso.'); };
+        return u;
+      });
+      try { speechSynthesis.resume(); } catch (e) { }
+      speechKeep.forEach(u => speechSynthesis.speak(u));
+      // se dopo un attimo non sta parlando, dillo invece di restare muti
+      setTimeout(() => { if (gen === speechGen && !speechSynthesis.speaking && !speechSynthesis.pending) toast('La voce non è partita: alza il volume, togli il silenzioso e riprova.'); }, 1800);
+    };
+    if (busy) { speechSynthesis.cancel(); setTimeout(go, 120); } else go(); // Safari perde la frase se parte subito dopo cancel()
+  }
+  const stopSpeaking = () => { speechGen++; speechKeep = []; if ('speechSynthesis' in window) speechSynthesis.cancel(); };
 
   const Timers = {
     list: {}, // id → { end, left, label, running }
@@ -512,16 +575,21 @@
 
   /** Azioni disponibili da tutte le schermate. */
   const Global = {
+    newRecipeGlobal() { newRecipe(); },
+    samples() { const n = addSamples(); toast(n + (n === 1 ? ' ricetta aggiunta' : ' ricette aggiunte') + ' a «Le mie ricette»'); const t = nav.top(); if (t) t.refresh(); },
+    deleteAll() {
+      confirmBox('Eliminare tutte le tue ricette?', `${S.imported.length} ricette, con note e foto, verranno eliminate per sempre. Non si può annullare.`, 'Elimina tutte', () => { deleteAllMine(); toast('Ricette eliminate'); const t = nav.top(); if (t) t.refresh(); }, true);
+    },
     openId(id) { const r = byId(id) || allKnown().find(x => x.id === id) || Object.values(S.plan).map(p => p.recipe).find(x => x.id === id); if (r) openRecipe(r); },
     recipeMenu(id) {
       const r = byId(id) || allKnown().find(x => x.id === id);
       if (!r) return;
       const fav = isFav(r), mine = isMine(r), bi = isBuiltin(r);
-      const delLabel = mine ? 'Elimina la ricetta' : bi ? 'Nascondi dal ricettario' : 'Rimuovi';
+      const delLabel = mine ? 'Elimina definitivamente' : 'Rimuovi';
       choose(r.title, [fav ? 'Togli dai preferiti' : 'Aggiungi ai preferiti', 'Apri', delLabel], i => {
         if (i === 0) { toggleFav(r); nav.top().refresh(); }
         else if (i === 1) openRecipe(r);
-        else confirmBox(delLabel + '?', mine ? 'La ricetta, le tue note e la foto verranno eliminate.' : bi ? 'Potrai farla ricomparire da Altro → Impostazioni.' : 'Verrà tolta da preferiti, piano e ricette cercate.',
+        else confirmBox(delLabel + '?', mine ? 'La ricetta, le tue note e la foto verranno eliminate per sempre. Non si può annullare.' : 'Verrà tolta da preferiti, piano e ricette cercate.',
           mine ? 'Elimina' : 'OK', () => { del(r); nav.top().refresh(); toast('Fatto'); }, mine);
       }, 2);
     }
@@ -572,7 +640,8 @@
         if (q) h += empty('search', `Nessuna ricetta salvata con «${q}»`, 'Tocca «Cerca sul web» per trovarne una.');
         else if (this.filter === 'Preferiti') h += empty('heart', 'Ancora nessun preferito', 'Tocca il cuore in una ricetta per ritrovarla qui.');
         else if (this.filter === 'Dal web') h += empty('globe', 'Nessuna ricetta dal web', 'Scrivi un piatto qui sopra e cercalo sul web.');
-        else h += empty('book', 'Nessuna ricetta', '');
+        else h += empty('book', 'Il tuo ricettario è vuoto', 'Scrivi una ricetta tua, cercane una sul web oppure aggiungi quelle di esempio: potrai eliminarle quando vuoi.')
+          + `<div class="btns">${btn('Nuova ricetta', 'edit', 'pri', 'newRecipeGlobal')}${samplesLeft() ? btn('Aggiungi gli esempi', 'plus', '', 'samples') : ''}</div>`;
         return h;
       }
       h += `<p class="muted mt12">${list.length === 1 ? '1 ricetta' : list.length + ' ricette'} · tieni premuto per altre azioni</p>` + grid(list);
@@ -834,7 +903,7 @@
     }
     menu() {
       const mine = isMine(this.base), bi = isBuiltin(this.base);
-      const items = [mine ? 'Modifica la ricetta' : 'Modifica una copia tra le mie', 'Leggi gli ingredienti ad alta voce', mine ? 'Elimina la ricetta' : bi ? 'Nascondi dal ricettario' : 'Rimuovi dalle ricette cercate'];
+      const items = [mine ? 'Modifica la ricetta' : 'Modifica una copia tra le mie', 'Leggi gli ingredienti ad alta voce', mine ? 'Elimina definitivamente' : 'Rimuovi dalle ricette cercate'];
       choose(this.base.title, items, i => {
         if (i === 0) {
           const c = RF.copy(this.base);
@@ -843,7 +912,7 @@
         } else if (i === 1) {
           const r = this.shown(), f = this.factor(r);
           speak(`Ingredienti per ${this.servings} porzioni. ` + r.ingredients.map(x => RF.quantityLabel(x, f) + ' di ' + x.name).join('. '));
-        } else confirmBox(items[2] + '?', mine ? 'La ricetta, le note e la foto verranno eliminate.' : 'Potrai ritrovarla cercandola di nuovo.', 'OK', () => { del(this.base); nav.back(); }, mine);
+        } else confirmBox(items[2] + '?', mine ? 'La ricetta, le note e la foto verranno eliminate per sempre. Non si può annullare.' : 'Potrai ritrovarla cercandola di nuovo.', 'OK', () => { del(this.base); nav.back(); }, mine);
       }, 2);
     }
   }
@@ -871,6 +940,7 @@
           + (left != null && !running ? ibtn('refresh', 'tReset', id, 'soft') : '') + '</div>'
           + `<div class="muted mt8">${running ? 'Tieni l\'app aperta: suona e ti avvisa quando finisce.' : left === 0 ? 'Tempo scaduto!' : 'Tocca ▶ per avviare il timer'}</div></div>`;
       }
+      h += `<div class="mt12">${btn('Leggi il passo', 'speaker', 'block', 'sayNow')}</div>`;
       h += `<div class="spacer"></div><div class="btns" style="margin-top:22px">${this.step > 0 ? btn('Indietro', 'prev', '', 'prev') : ''}${this.step < n - 1 ? btn('Avanti', 'next', 'pri', 'next') : btn('Fatto, buon appetito!', 'check', 'pri', 'done')}</div></div>`;
       return h;
     }
@@ -890,6 +960,7 @@
     next() { if (this.step < this.r.steps.length - 1) this.go(this.step + 1); }
     prev() { if (this.step > 0) this.go(this.step - 1); }
     say() { speak(`Passo ${this.step + 1}. ` + this.r.steps[this.step]); }
+    sayNow() { if ('speechSynthesis' in window && speechSynthesis.speaking) { stopSpeaking(); toast('Voce fermata'); } else this.say(); }
     toggleVoice() { this.voice = !this.voice; if (this.voice) this.say(); else stopSpeaking(); toast(this.voice ? 'Lettura ad alta voce attiva' : 'Lettura disattivata'); this.rebuild(); }
     tStart(id) {
       id = +id;
@@ -1174,8 +1245,10 @@
     actions() { return ibtn('plus', 'newOne'); }
     render() {
       let h = `<div class="btns" style="margin-top:0">${btn('Nuova', 'edit', 'pri', 'newOne')}${btn('Da un testo', 'copy', '', 'fromText')}</div>`;
-      if (!S.imported.length) return h + empty('book', 'Nessuna ricetta tua', 'Scrivila tu, incolla un testo oppure salva e modifica una ricetta trovata sul web.');
-      return h + `<div class="small mt16">${S.imported.length} ${S.imported.length === 1 ? 'ricetta' : 'ricette'} · tieni premuto per altre azioni</div>` + grid(S.imported);
+      if (!S.imported.length) return h + empty('book', 'Nessuna ricetta tua', 'Scrivila tu, incolla un testo oppure salva e modifica una ricetta trovata sul web.')
+        + (samplesLeft() ? `<div class="btns">${btn('Aggiungi le ricette di esempio', 'plus', 'block', 'samples')}</div>` : '');
+      return h + `<div class="small mt16">${S.imported.length} ${S.imported.length === 1 ? 'ricetta' : 'ricette'} · tieni premuto per eliminarla definitivamente</div>` + grid(S.imported)
+        + `<div class="mt16">${btn('Elimina tutte le mie ricette', 'trash', 'danger block', 'deleteAll')}</div>`;
     }
     newOne() { newRecipe(); }
     fromText() { nav.push(new ImportScreen('')); }
@@ -1266,9 +1339,11 @@
       h += `<div class="card"><h2>Aspetto</h2><div class="small mt12">Colore</div><div class="flow mt8">${ACCENTS.map(([n, a, b]) => `<button class="chip ${n === S.accent ? 'on' : ''}" data-a="setAccent" data-x="${n}" style="display:flex;gap:8px;align-items:center${n === S.accent ? `;background:color-mix(in srgb, ${a} 25%, var(--surface));border-color:${a};color:var(--text)` : ''}"><span class="dot2" style="background:linear-gradient(135deg,${a},${b})"></span>${n}</button>`).join('')}</div>`
         + `<div class="small mt16">Tema</div><div class="flow mt8">${[['system', 'Come il telefono'], ['light', 'Chiaro'], ['dark', 'Scuro']].map(([k, l]) => chip(l, k === S.appearance, 'setMode', k)).join('')}</div></div>`;
       h += `<div class="card"><h2>In cucina</h2><div class="row mt12"><div class="grow"><h3>Persone in casa</h3><div class="muted mt4">Porzioni predefinite del piano settimanale</div></div>${stepper(String(S.household), 'hMinus', 'hPlus')}</div>`
-        + `<div class="mt16">${toggleRow('Leggi i passaggi ad alta voce', 'In modalità cucina, appena cambi passaggio', S.speakSteps, 'setSpeak')}</div></div>`;
-      h += `<div class="card"><h2>Ricettario e dati</h2><p class="muted">${builtin.length} ricette nel ricettario${S.hidden.length ? ', ' + S.hidden.length + ' nascoste' : ''} · ${Object.keys(S.webCache).length} cercate sul web</p>`
-        + (S.hidden.length ? `<div class="mt12">${btn('Mostra di nuovo le ricette nascoste', 'refresh', 'block', 'unhide')}</div>` : '')
+        + `<div class="mt16">${toggleRow('Leggi i passaggi ad alta voce', 'In modalità cucina, appena cambi passaggio', S.speakSteps, 'setSpeak')}</div>`
+        + `<div class="small mt16">Velocità della voce</div><div class="flow mt8">${[['Lenta', 0.85], ['Normale', 1], ['Veloce', 1.2]].map(([l, v]) => chip(l, S.speakRate === v, 'setRate', String(v))).join('')}</div>`
+        + `<div class="mt12">${btn('Prova la voce', 'speaker', 'block', 'testVoice')}</div></div>`;
+      h += `<div class="card"><h2>Ricettario e dati</h2><p class="muted">${S.imported.length} ricette tue · ${Object.keys(S.webCache).length} cercate sul web</p>`
+        + (samplesLeft() ? `<p class="muted mt8">Il ricettario parte vuoto. Puoi aggiungere ${samplesLeft()} ricette di esempio tra le tue: poi si modificano ed eliminano come le altre.</p><div class="mt12">${btn('Aggiungi le ricette di esempio', 'plus', 'block', 'samples')}</div>` : '')
         + (Object.keys(S.webCache).length ? `<div class="mt12">${btn('Dimentica le ricette cercate sul web', 'trash', 'danger block', 'forgetWeb')}</div>` : '')
         + `<div class="btns">${btn('Esporta backup', 'share', '', 'exportData')}${btn('Importa backup', 'copy', '', 'importData')}</div>`
         + `<p class="muted mt8">Il backup contiene ricette, piano, spesa e note (non le foto). Utile per passare a un altro telefono.</p></div>`;
@@ -1287,7 +1362,8 @@
     hMinus() { if (S.household > 1) { S.household--; save(); this.refresh(); } }
     hPlus() { if (S.household < 12) { S.household++; save(); this.refresh(); } }
     setSpeak(x, el) { S.speakSteps = el.checked; save(); }
-    unhide() { S.hidden = []; save(); toast('Ricette ripristinate'); this.refresh(); }
+    setRate(v) { S.speakRate = +v; save(); this.refresh(); speak('Così suona la voce di RecipeFlow.'); }
+    testVoice() { speak('Ciao! Questa è la voce di RecipeFlow. Se mi senti, la lettura funziona.'); }
     forgetWeb() { confirmBox('Dimenticare le ricette dal web?', 'Le preferite e i pasti già nel piano restano.', 'OK', () => { S.webCache = {}; S.history = []; save(); this.refresh(); }); }
     exportData() {
       const data = Object.assign({}, S, { geminiKey: '' });
