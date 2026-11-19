@@ -353,8 +353,6 @@
   // =====================================================================
   // VOCE, TIMER, SCHERMO ACCESO
   // =====================================================================
-  // Sintesi vocale. Accorgimenti per Safari/iPhone: voce scelta a mano, attesa dopo cancel(),
-  // testo spezzato in frasi, riferimenti tenuti vivi e un suono silenzioso che «sblocca» l'audio.
   const SPEECH_LANG = { it: 'it-IT', en: 'en-US', es: 'es-ES', fr: 'fr-FR', de: 'de-DE', pt: 'pt-PT' };
   let voices = [], speechKeep = [], speechGen = 0, silentAudio = null;
   function loadVoices() { try { voices = speechSynthesis.getVoices() || []; } catch (e) { voices = []; } }
@@ -408,17 +406,14 @@
       });
       try { speechSynthesis.resume(); } catch (e) { }
       speechKeep.forEach(u => speechSynthesis.speak(u));
-      // se dopo un attimo non sta parlando, dillo invece di restare muti
       setTimeout(() => { if (gen === speechGen && !speechSynthesis.speaking && !speechSynthesis.pending) toast('La voce non è partita: alza il volume, togli il silenzioso e riprova.'); }, 1800);
     };
-    if (busy) { speechSynthesis.cancel(); setTimeout(go, 120); } else go(); // Safari perde la frase se parte subito dopo cancel()
+    if (busy) { speechSynthesis.cancel(); setTimeout(go, 120); } else go();
   }
   const stopSpeaking = () => { speechGen++; speechKeep = []; if ('speechSynthesis' in window) speechSynthesis.cancel(); };
 
   const Timers = {
-    list: {}, // id → { end, left, label, running }
-    audio: null,
-    tick: null,
+    list: {}, audio: null, tick: null,
     start(id, secs, label) {
       const t = this.list[id] || {};
       t.label = label; t.end = Date.now() + secs * 1000; t.running = true; t.left = secs;
@@ -466,7 +461,6 @@
       alertBox('⏰ Tempo scaduto', label);
     }
   };
-  // quando torni nell'app dopo averla lasciata, i timer si aggiornano subito
   document.addEventListener('visibilitychange', () => { if (!document.hidden && Object.keys(Timers.list).length) Timers.loop(); });
 
   let wakeLock = null;
@@ -544,13 +538,11 @@
   };
 
   window.addEventListener('popstate', () => {
-    // il tasto indietro (o il gesto) toglie una schermata
     if (document.querySelector('.overlay')) { document.querySelectorAll('.overlay').forEach(o => o.remove()); history.pushState({ d: nav.stack.length }, ''); return; }
     if (nav.stack.length > 1) nav.popNow();
     else if (nav.tab !== 0) nav.setTab(0);
   });
 
-  // ---- eventi delegati: data-a = metodo della schermata in primo piano ----
   let longFired = false, longTimer = null;
   function dispatch(el, attr, ev) {
     const s = nav.top(), name = el.getAttribute(attr);
@@ -580,7 +572,6 @@
   });
   document.addEventListener('contextmenu', e => { if (e.target.closest('[data-long]')) e.preventDefault(); });
 
-  /** Azioni disponibili da tutte le schermate. */
   const Global = {
     newRecipeGlobal() { newRecipe(); },
     samples() { const n = addSamples(); toast(n + (n === 1 ? ' ricetta aggiunta' : ' ricette aggiunte') + ' a «Le mie ricette»'); const t = nav.top(); if (t) t.refresh(); },
@@ -607,7 +598,6 @@
     }
   };
 
-  /** Apre una ricetta; se è un'idea dal web prepara prima la ricetta completa. */
   async function openRecipe(r) {
     const c = cached(r);
     if (!Ai.isStub(c)) { nav.push(new RecipeScreen(c)); return; }
@@ -763,7 +753,6 @@
       h += `<div class="btns">${btn('Cucina', 'play', 'pri', 'cook')}${btn('Spesa', 'cart', '', 'shop')}${btn('Piano', 'calendar', '', 'plan')}</div>`;
       h += `<div class="inline-bar">${btn('Modifica completa', 'edit', '', 'editRecipe')}${this.inlineDirty ? `${btn('Salva come mia', 'check', 'pri', 'saveInlineAsMine')}${btn('Ripristina', 'refresh', '', 'resetInline')}` : ''}</div>`;
 
-      // versione leggera
       const kb = RF.perServing(orig).kcal, ka = RF.perServing(lr.light).kcal;
       h += `<div class="card" id="lightCard"><div class="row"><span class="acc">${ic('leaf')}</span><div class="grow"><h3>Versione leggera e completa</h3><div class="muted mt4">${lr.changes.length ? `${kcal(kb)} → ${kcal(ka)} kcal a porzione · ${lr.changes.length} ${lr.changes.length === 1 ? 'modifica' : 'modifiche'}` : 'È già una ricetta equilibrata'}</div></div>${toggle(this.light, 'setLight')}</div>`;
       if (this.light) {
@@ -781,7 +770,6 @@
       else if (this.moldBase > 0) h += this.moldPanel();
       else h += this.enableDoughCard();
 
-      // ingredienti
       h += `<div class="card"><div class="row"><h2 class="grow">Ingredienti</h2>${this.dough ? '' : stepper(this.servings + ' porz.', 'servMinus', 'servPlus')}</div>`;
       r.ingredients.forEach((i, idx) => {
         const have = RF.pantryHas(S.fridge, S.staples, i.name);
@@ -792,7 +780,6 @@
       else h += `<p class="muted">Tocca un ingrediente per cambiare dose o rimuoverlo.</p>`;
       h += '</div>';
 
-      // passaggi
       h += `<div class="card"><h2>Procedimento</h2>`;
       r.steps.forEach((st, k) => {
         const kind = RF.classify(st), secs = RF.seconds(st);
@@ -801,7 +788,6 @@
       });
       h += `<div class="inline-bar">${btn('Aggiungi passo', 'plus', '', 'addStepInline')}${btn('Avvia la modalità cucina', 'play', 'pri', 'cook')}</div></div>`;
 
-      // fonti
       if (r.notes || r.sources.length) {
         h += `<div class="card"><h2>Dal web</h2>${r.notes ? `<p>${esc(r.notes)}</p>` : ''}`;
         if (r.sources.length) h += `<div class="small mt12">Fonti consultate</div>` + r.sources.map(s => {
@@ -811,13 +797,11 @@
         h += '</div>';
       }
 
-      // coach
       h += `<div class="card"><div class="row"><span class="acc">${ic('magic')}</span><h3 class="grow">Coach AI: rendila più sana</h3></div>`;
       if (this.coachText == null) h += `<p class="muted">Sostituzioni ragionate, aggiunte per completare il pasto e consigli di cottura, scritti da Gemini per questa ricetta.</p><div class="mt12">${btn('Chiedi al coach', null, 'block', 'coach')}</div>`;
       else h += this.coachHtml(this.coachText);
       h += '</div>';
 
-      // note personali
       h += `<div class="card"><h2>Le tue note</h2><div class="stars">${[1, 2, 3, 4, 5].map(v => `<button class="ibtn ${v <= p.rating ? 'on' : ''}" data-a="rate" data-x="${v}">${ic(v <= p.rating ? 'starFill' : 'star')}</button>`).join('')}</div>`
         + `<div class="note ${p.notes ? '' : 'empty'}" data-a="editNotes">${esc(p.notes || 'Tocca per scrivere un appunto (es. «meno sale», «20 minuti in più in forno»)')}</div>`
         + `<div class="btns">${btn('L\'ho cucinata', 'check', '', 'cooked')}${btn(p.photo ? 'Cambia foto' : 'Foto', 'camera', '', 'photo')}</div></div>`;
@@ -869,7 +853,6 @@
         + row('Temperatura della stanza', D.g(d.temp) + ' °C', 'temp') + row('Inforno alle', String(d.bakeHour).padStart(2, '0') + ':00', 'bakeHour');
       h += `<div class="mt8">${toggleRow('Lievito secco', 'Al posto del lievito di birra fresco (un terzo della dose)', d.dryYeast, 'dDry')}</div>`;
       h += `<div class="res"><b>Farina ${D.g(D.flour(d))} g · Acqua ${D.g(D.water(d))} g · Lievito ${D.g(D.yeastG(d))} g · Sale ${D.g(D.saltG(d))} g${D.oilG(d) > 0 ? ' · Olio ' + D.g(D.oilG(d)) + ' g' : ''}</b><div class="acc mt4" style="font-weight:700">${esc(D.schedule(d))}</div></div>`;
-      // Se l'impasto NON è nativo della ricetta (attivato dall'utente), do la possibilità di toglierlo.
       if (!(this.base.kind && this.base.kind.startsWith('dough:'))) {
         h += `<div class="mt12">${btn('Togli parametri impasto', 'trash', 'txt block', 'disableDough')}</div>`;
       }
@@ -1359,4 +1342,171 @@
   // =====================================================================
   // ALTRO, LE MIE RICETTE, EDITOR, IMPORTAZIONE, IMPOSTAZIONI
   // =====================================================================
-  function newRecipe() { nav.push(new Editor(RF.normRecipe({ id: 'my-' + Date.now().toString(36), title: '', source: 'Le mie ricette', servings: 
+  function newRecipe() { nav.push(new Editor(RF.normRecipe({ id: 'my-' + Date.now().toString(36), title: '', source: 'Le mie ricette', servings: 2 }))); }
+
+  class More extends Screen {
+    get title() { return 'Altro'; }
+    render() {
+      const cooked = Object.values(S.personal).reduce((a, p) => a + (p.cooked || 0), 0);
+      const stat = (n, l) => `<div class="card stat"><b>${n}</b><span class="muted">${l}</span></div>`;
+      const item = (icon, t, sub, a) => `<div class="lrow" ${A(a)}><span class="icbox">${ic(icon)}</span><div class="grow"><h3>${t}</h3><div class="muted mt4">${esc(sub)}</div></div><span style="color:var(--muted)">${ic('next')}</span></div>`;
+      return `<div class="row" style="margin-top:-14px">${stat(S.imported.length, 'ricette tue')}${stat(S.favorites.length, 'preferite')}${stat(cooked, 'piatti cucinati')}</div>`
+        + `<div class="card menu" style="padding:6px">${item('book', 'Le mie ricette', 'Scrivi, modifica e organizza le tue ricette', 'mine')}${item('edit', 'Nuova ricetta', 'Con calcolo automatico di calorie e reparti', 'newOne')}`
+        + `${item('copy', 'Importa da un testo', 'Didascalie, trascrizioni, pagine web', 'importText')}${item('heart', 'Preferiti', S.favorites.length ? S.favorites.length + ' ricette' : 'Ancora nessuno', 'favs')}${item('gear', 'Impostazioni', 'Gemini, lingua, tema, famiglia', 'settings')}</div>`
+        + `<div class="card"><div class="row"><img src="icons/icon-192.png" alt="" style="width:48px;height:48px;border-radius:12px"><div class="grow"><h3>RecipeFlow</h3><div class="muted mt4">Web app · versione 1.0 · di Arturo Clemente</div></div></div>`
+        + `<p class="muted">Ricette dal web con Google Gemini (piano gratuito), versione leggera calcolata sul telefono, impasti con parametri, piano settimanale e spesa. I dati restano su questo telefono. I valori nutrizionali sono stime da tabelle medie e non sostituiscono il parere di un nutrizionista.</p>`
+        + (isStandalone() ? '' : `<div class="res"><b>Installala sul telefono</b><div class="muted mt4">iPhone: in Safari tocca Condividi → «Aggiungi alla schermata Home». Android: menu ⋮ di Chrome → «Installa app».</div></div>`) + '</div>';
+    }
+    mine() { nav.push(new MyRecipes()); }
+    newOne() { newRecipe(); }
+    importText() { nav.push(new ImportScreen('')); }
+    favs() { nav.push(new Favorites()); }
+    settings() { nav.push(new SettingsScreen()); }
+  }
+
+  class Favorites extends Screen {
+    get title() { return 'Preferiti'; }
+    render() { return S.favorites.length ? grid(S.favorites) : empty('heart', 'Ancora nessun preferito', 'Tocca il cuore in alto in una ricetta.'); }
+  }
+
+  class MyRecipes extends Screen {
+    get title() { return 'Le mie ricette'; }
+    actions() { return ibtn('plus', 'newOne'); }
+    render() {
+      let h = `<div class="btns" style="margin-top:0">${btn('Nuova', 'edit', 'pri', 'newOne')}${btn('Da un testo', 'copy', '', 'fromText')}</div>`;
+      if (!S.imported.length) return h + empty('book', 'Nessuna ricetta tua', 'Scrivila tu, incolla un testo oppure salva e modifica una ricetta trovata sul web.')
+        + (samplesLeft() ? `<div class="btns">${btn('Aggiungi le ricette di esempio', 'plus', 'block', 'samples')}</div>` : '');
+      return h + `<div class="small mt16">${S.imported.length} ${S.imported.length === 1 ? 'ricetta' : 'ricette'} · tieni premuto per eliminarla definitivamente</div>` + grid(S.imported)
+        + `<div class="mt16">${btn('Elimina tutte le mie ricette', 'trash', 'danger block', 'deleteAll')}</div>`;
+    }
+    newOne() { newRecipe(); }
+    fromText() { nav.push(new ImportScreen('')); }
+  }
+
+  class Editor extends Screen {
+    constructor(r) { super(); this.r = r; this.servings = Math.max(1, r.servings); this.difficulty = r.difficulty; }
+    get title() { return this.r.title ? 'Modifica' : 'Nuova ricetta'; }
+    actions() { return `<button class="link" style="font-size:16px" data-a="save">Salva</button>`; }
+    render() {
+      const r = this.r, f = (label, inner) => `<div class="field"><span class="small">${label}</span>${inner}</div>`;
+      return f('Titolo', `<input class="input" id="e-title" placeholder="es. Lasagne della nonna" value="${esc(r.title)}">`)
+        + f('Descrizione', `<textarea class="input" id="e-desc" rows="2" placeholder="Due righe sul piatto (facoltativo)">${esc(r.description)}</textarea>`)
+        + `<div class="row field"><div><span class="small" style="display:block;margin-bottom:6px">Porzioni</span>${stepper(String(this.servings), 'sMinus', 'sPlus')}</div><div class="grow"><span class="small" style="display:block;margin-bottom:6px">Minuti</span><input class="input" id="e-min" inputmode="numeric" placeholder="30" value="${r.minutes || ''}"></div></div>`
+        + f('Difficoltà', `<div class="flow">${['Facile', 'Media', 'Difficile'].map(d => chip(d, d === this.difficulty, 'diff', d)).join('')}</div>`)
+        + f('Tag (separati da virgola)', `<input class="input" id="e-tags" placeholder="es. Vegetariana, Veloce, Dolce" value="${esc(r.tags.join(', '))}">`)
+        + f('Ingredienti, uno per riga', `<textarea class="input" id="e-ings" rows="7" placeholder="200 g farina&#10;2 uova&#10;1 cucchiaio di olio&#10;sale q.b.">${esc(r.ingredients.map(RF.lineOf).join('\n'))}</textarea>`)
+        + `<p class="muted">Scrivi quantità, unità e nome: le calorie e i reparti della spesa si calcolano da soli.</p>`
+        + f('Procedimento, un passaggio per paragrafo', `<textarea class="input" id="e-steps" rows="9" placeholder="Lascia una riga vuota tra un passaggio e l'altro.&#10;Scrivi i tempi (es. 10 minuti): diventano timer.">${esc(r.steps.map(s => s.replace(/\s*→ Versione leggera:.*$/, '')).join('\n\n'))}</textarea>`)
+        + `<div class="mt16">${btn('Salva la ricetta', 'check', 'pri block', 'save')}</div>`;
+    }
+    keep() {
+      const v = id => ($('#' + id) || {}).value;
+      if ($('#e-title')) Object.assign(this.r, { title: v('e-title'), description: v('e-desc'), minutes: parseInt(v('e-min'), 10) || 0 });
+      this.draft = { tags: v('e-tags'), ings: v('e-ings'), steps: v('e-steps') };
+    }
+    after() {
+      if (this.draft) { $('#e-tags').value = this.draft.tags; $('#e-ings').value = this.draft.ings; $('#e-steps').value = this.draft.steps; }
+    }
+    sMinus() { this.keep(); if (this.servings > 1) this.servings--; this.refresh(); }
+    sPlus() { this.keep(); if (this.servings < 40) this.servings++; this.refresh(); }
+    diff(d) { this.keep(); this.difficulty = d; this.refresh(); }
+    save() {
+      const t = $('#e-title').value.trim();
+      if (!t) { toast('Dai un titolo alla ricetta'); $('#e-title').focus(); return; }
+      const old = {}; for (const i of this.r.ingredients) old[RF.lineOf(i)] = i;
+      const n = RF.copy(this.r);
+      n.title = t; n.description = $('#e-desc').value.trim(); n.servings = this.servings; n.minutes = parseInt($('#e-min').value, 10) || 0; n.difficulty = this.difficulty;
+      n.tags = $('#e-tags').value.split(',').map(x => x.trim()).filter(Boolean).map(cap);
+      n.ingredients = $('#e-ings').value.split('\n').map(l => l.trim()).filter(Boolean).map(l => old[l] ? RF.copy(old[l]) : RF.parseLine(l));
+      const all = $('#e-steps').value.trim();
+      n.steps = (all.includes('\n\n') ? all.split(/\n\s*\n/) : all.split('\n')).map(p => p.trim().replace(/^\d+[.)]\s*/, '').replace(/\n/g, ' ')).filter(Boolean);
+      n.light = false;
+      if (n.kind.startsWith('idea:')) n.kind = '';
+      if (!n.source || n.source.startsWith('Idea')) n.source = 'Le mie ricette';
+      saveMine(n);
+      toast('Ricetta salvata');
+      nav.stack.pop();
+      if (nav.top() instanceof RecipeScreen) nav.stack.pop();
+      nav.stack.push(new RecipeScreen(n));
+      history.replaceState({ d: nav.stack.length }, '');
+      nav.draw(false);
+    }
+  }
+
+  class ImportScreen extends Screen {
+    constructor(text) { super(); this.text = text; }
+    get title() { return 'Importa da un testo'; }
+    render() {
+      return `<p class="muted" style="margin-top:0">Incolla la didascalia di un video, il testo di una pagina o la ricetta della nonna: Gemini la trasforma in una ricetta con quantità, passaggi e valori.</p>`
+        + `<textarea class="input mt12" id="imp" rows="12" placeholder="Incolla qui il testo…">${esc(this.text)}</textarea>`
+        + `<div class="mt12">${btn('Crea la ricetta', 'magic', 'pri block', 'go')}</div><p class="muted mt12">Vuoi solo il nome di un piatto? Scrivilo in Scopri e tocca «Cerca sul web».</p>`;
+    }
+    async go() {
+      this.text = $('#imp').value.trim();
+      if (this.text.length < 20) { toast('Incolla un testo un po\' più lungo'); return; }
+      if (!ai().ready) { needKey(); return; }
+      try {
+        const r = await run('Leggo la ricetta…', () => ai().importText(this.text));
+        nav.stack.pop(); nav.stack.push(new Editor(r));
+        history.replaceState({ d: nav.stack.length }, '');
+        nav.draw(false); toast('Controlla e salva');
+      } catch (e) { }
+    }
+  }
+
+  class SettingsScreen extends Screen {
+    get title() { return 'Impostazioni'; }
+    render() {
+      let h = `<div class="card" style="margin-top:0"><div class="row"><span class="acc">${ic('magic')}</span><h2 class="grow">Google Gemini (gratis)</h2></div>`
+        + `<p class="muted">Serve per cercare ricette sul web, le idee con il frigo, il menù della settimana, il coach e l'importazione.</p>`
+        + `<div class="field"><span class="small">Chiave API</span><input class="input" id="s-key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Incolla la chiave (inizia con AIza…)" value="${esc(S.geminiKey)}" style="font-family:ui-monospace,Menlo,monospace;font-size:14px"></div>`
+        + `<div class="field"><span class="small">Modello</span><input class="input" id="s-model" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${RF.DEFAULT_MODEL}" value="${esc(S.geminiModel)}"></div>`
+        + `<div class="btns">${btn('Salva e prova', 'check', 'pri', 'saveKey')}${btn('Ottieni la chiave', 'globe', '', 'getKey')}</div>`
+        + `<p class="muted mt12">Come si fa: apri aistudio.google.com, accedi con il tuo account Google, tocca «Create API key», copiala e incollala qui. Il piano gratuito basta per l'uso di tutti i giorni. La chiave resta solo su questo telefono.</p></div>`;
+      h += `<div class="card"><h2>Lingua delle ricette dal web</h2><div class="flow mt12">${RF.LANGS.map(l => chip(l[1], l[0] === S.lang, 'setLang', l[0])).join('')}</div></div>`;
+      h += `<div class="card"><h2>Aspetto</h2><div class="small mt12">Colore</div><div class="flow mt8">${ACCENTS.map(([n, a, b]) => `<button class="chip ${n === S.accent ? 'on' : ''}" data-a="setAccent" data-x="${n}" style="display:flex;gap:8px;align-items:center${n === S.accent ? `;background:color-mix(in srgb, ${a} 25%, var(--surface));border-color:${a};color:var(--text)` : ''}"><span class="dot2" style="background:linear-gradient(135deg,${a},${b})"></span>${n}</button>`).join('')}</div>`
+        + `<div class="small mt16">Tema</div><div class="flow mt8">${[['system', 'Come il telefono'], ['light', 'Chiaro'], ['dark', 'Scuro']].map(([k, l]) => chip(l, k === S.appearance, 'setMode', k)).join('')}</div></div>`;
+      h += `<div class="card"><h2>In cucina</h2><div class="row mt12"><div class="grow"><h3>Persone in casa</h3><div class="muted mt4">Porzioni predefinite del piano settimanale</div></div>${stepper(String(S.household), 'hMinus', 'hPlus')}</div>`
+        + `<div class="mt16">${toggleRow('Leggi i passaggi ad alta voce', 'In modalità cucina, appena cambi passaggio', S.speakSteps, 'setSpeak')}</div>`
+        + `<div class="small mt16">Velocità della voce</div><div class="flow mt8">${[['Lenta', 0.85], ['Normale', 1], ['Veloce', 1.2]].map(([l, v]) => chip(l, S.speakRate === v, 'setRate', String(v))).join('')}</div>`
+        + `<div class="mt12">${btn('Prova la voce', 'speaker', 'block', 'testVoice')}</div></div>`;
+      h += `<div class="card"><h2>Ricettario e dati</h2><p class="muted">${S.imported.length} ricette tue · ${Object.keys(S.webCache).length} cercate sul web</p>`
+        + (samplesLeft() ? `<p class="muted mt8">Il ricettario parte vuoto. Puoi aggiungere ${samplesLeft()} ricette di esempio tra le tue: poi si modificano ed eliminano come le altre.</p><div class="mt12">${btn('Aggiungi le ricette di esempio', 'plus', 'block', 'samples')}</div>` : '')
+        + (Object.keys(S.webCache).length ? `<div class="mt12">${btn('Dimentica le ricette cercate sul web', 'trash', 'danger block', 'forgetWeb')}</div>` : '')
+        + `<div class="btns">${btn('Esporta backup', 'share', '', 'exportData')}${btn('Importa backup', 'copy', '', 'importData')}</div>`
+        + `<p class="muted mt8">Il backup contiene ricette, piano, spesa e note (non le foto). Utile per passare a un altro telefono.</p></div>`;
+      return h;
+    }
+    async saveKey() {
+      S.geminiKey = $('#s-key').value.trim(); S.geminiModel = $('#s-model').value.trim() || RF.DEFAULT_MODEL; save();
+      document.activeElement && document.activeElement.blur();
+      if (!S.geminiKey) { toast('Chiave rimossa'); return; }
+      try { await run('Provo la chiave…', () => ai().generate('Reply with one short word.', 'Say OK', { maxTokens: 20 })); alertBox('Tutto pronto ✅', 'La chiave funziona: ora puoi cercare qualsiasi ricetta sul web.'); } catch (e) { }
+    }
+    getKey() { window.open('https://aistudio.google.com/apikey', '_blank'); }
+    setLang(l) { S.lang = l; save(); this.refresh(); }
+    setAccent(n) { S.accent = n; save(); applyTheme(); nav.drawTabs(); this.refresh(); }
+    setMode(m) { S.appearance = m; save(); applyTheme(); this.refresh(); }
+    hMinus() { if (S.household > 1) { S.household--; save(); this.refresh(); } }
+    hPlus() { if (S.household < 12) { S.household++; save(); this.refresh(); } }
+    setSpeak(x, el) { S.speakSteps = el.checked; save(); }
+    setRate(v) { S.speakRate = +v; save(); this.refresh(); speak('Così suona la voce di RecipeFlow.'); }
+    testVoice() { speak('Ciao! Questa è la voce di RecipeFlow. Se mi senti, la lettura funziona.'); }
+    forgetWeb() { confirmBox('Dimenticare le ricette dal web?', 'Le preferite e i pasti già nel piano restano.', 'OK', () => { S.webCache = {}; S.history = []; save(); this.refresh(); }); }
+    exportData() {
+      const data = Object.assign({}, S, { geminiKey: '' });
+      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const file = new File([blob], 'recipeflow-backup.json', { type: 'application/json' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) navigator.share({ files: [file], title: 'Backup RecipeFlow' }).catch(() => { });
+      else { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'recipeflow-backup.json'; a.click(); }
+    }
+    importData() {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = 'application/json,.json';
+      inp.onchange = async () => {
+        try {
+          const d = JSON.parse(await inp.files[0].text());
+          confirmBox('Importare il backup?', 'Sostituisce ricette, piano, spesa e note di questo telefono.', 'Importa', () => {
+            const key = S.geminiKey; Object.assign(S, d); if (!S.geminiKey) S.geminiKey = key; save(); load(); applyTheme(); nav.drawTabs(); this.refresh(); toast('Backup importato');
+          });
+        } catch (e) { alertBox('File non valido', 'Scegli un file di backup
