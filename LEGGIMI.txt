@@ -1,11 +1,3 @@
-NOVITÀ (versione aggiornata)
-- Il ricettario parte VUOTO. Le ricette di esempio si aggiungono da Altro → Impostazioni (o dal riquadro in «Scopri»).
-- Eliminazione DEFINITIVA: tieni premuta una ricetta tua → «Elimina definitivamente»; oppure «Elimina tutte le mie ricette»
-  in Altro → Le mie ricette. Non si può annullare.
-- Lettura a voce rinforzata per iPhone: bottone «Leggi il passo» in modalità cucina, velocità lenta/normale/veloce
-  e «Prova la voce» in Impostazioni. Se non parte, controlla volume e tasto silenzioso (e la voce italiana in
-  iPhone → Impostazioni → Accessibilità → Contenuto letto → Voci).
-
 RecipeFlow — web app per iPhone (e Android, PC)
 ================================================
 

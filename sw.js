@@ -1,5 +1,5 @@
 /* RecipeFlow — service worker: l'app funziona anche senza rete (le ricerche sul web no). */
-const CACHE = 'recipeflow-v2';
+const CACHE = 'recipeflow-v1';
 const FILES = ['./', 'index.html', 'src/style.css', 'src/engine.js', 'src/ai.js', 'src/art.js', 'src/app.js', 'recipes.json', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/favicon.png'];
 
