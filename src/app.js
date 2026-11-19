@@ -369,7 +369,32 @@
     d.setUint32(24, rate, true); d.setUint32(28, rate * 2, true); d.setUint16(32, 2, true); d.setUint16(34, 16, true); w(36, 'data'); d.setUint32(40, n * 2, true);
     return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
   })();
-  const ttsCache = new Map();
+  const ttsCache = new Map();   // testo → URL audio (in memoria)
+  const ttsPending = new Map(); // testo → richiesta in corso
+  const TtsStore = {           // audio già scaricati, conservati nel telefono: non consumano altre richieste
+    db: null,
+    open() {
+      if (this.db) return Promise.resolve(this.db);
+      return new Promise((ok, ko) => { const q = indexedDB.open('recipeflow-tts', 1); q.onupgradeneeded = () => q.result.createObjectStore('a'); q.onsuccess = () => { this.db = q.result; ok(this.db); }; q.onerror = () => ko(q.error); });
+    },
+    async get(k) { try { const db = await this.open(); return await new Promise(ok => { const q = db.transaction('a').objectStore('a').get(k); q.onsuccess = () => ok(q.result || null); q.onerror = () => ok(null); }); } catch (e) { return null; } },
+    async put(k, blob) { try { const db = await this.open(); db.transaction('a', 'readwrite').objectStore('a').put(blob, k); } catch (e) { } }
+  };
+  /** Audio di Google per un testo: dalla memoria, dal telefono o da internet (una sola richiesta anche se chiesto più volte). */
+  function ttsUrl(text) {
+    if (ttsCache.has(text)) return Promise.resolve(ttsCache.get(text));
+    if (ttsPending.has(text)) return ttsPending.get(text);
+    const pr = (async () => {
+      let blob = await TtsStore.get(text);
+      if (!blob) { blob = await ai().tts(text); TtsStore.put(text, blob); }
+      const url = URL.createObjectURL(blob);
+      ttsCache.set(text, url);
+      return url;
+    })();
+    ttsPending.set(text, pr);
+    pr.then(() => ttsPending.delete(text), () => ttsPending.delete(text));
+    return pr;
+  }
 
   const Voice = {
     ok: 'speechSynthesis' in window, voices: [], log: [], keep: null, queue: [], started: false, watchdog: null, audio: null, playing: false, token: 0,
@@ -400,7 +425,12 @@
       if (m === 'google') return this.google(text, my);
       if (!this.ok) { if (S.geminiKey) return this.google(text, my); toast('Questo browser non ha la sintesi vocale'); return; }
       if (m === 'phone+') {
+        // un audio muto in riproduzione continua porta l'iPhone in modalità "riproduzione": così la voce non segue il tasto silenzioso
         try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { }
+        try {
+          if (!this.keepAlive) { this.keepAlive = new Audio(SILENT_WAV); this.keepAlive.loop = true; this.keepAlive.setAttribute('playsinline', ''); }
+          this.keepAlive.play().catch(() => { });
+        } catch (e) { }
       }
       this.system(text, my);
       if (m === 'auto') {
@@ -424,7 +454,7 @@
         u.lang = LANGCODE();
         const v = this.pick(); if (v) u.voice = v;
         u.onstart = () => { this.started = true; this.note('voce del telefono: parte (' + (v ? v.name : 'predefinita') + ')'); };
-        u.onend = () => next();
+        u.onend = () => { if (!this.queue.length && this.keepAlive) try { this.keepAlive.pause(); } catch (e) { } next(); };
         u.onerror = e => { this.note('voce del telefono: errore ' + e.error); if (e.error !== 'interrupted' && e.error !== 'canceled') next(); };
         this.keep = u;
         speechSynthesis.speak(u);
@@ -438,13 +468,9 @@
       const a = this.audio;
       if (!fromAuto) { try { a.src = SILENT_WAV; a.play().catch(() => { }); } catch (e) { } } // sblocco dentro il tocco
       try {
-        let url = ttsCache.get(text);
-        if (!url) {
-          toast('Preparo la voce…');
-          const blob = await ai().tts(text);
-          url = URL.createObjectURL(blob);
-          ttsCache.set(text, url);
-        }
+        if (!ttsCache.has(text)) toast('Preparo la voce…');
+        const url = await ttsUrl(text);
+        this.usedGoogle = true;
         if (my !== this.token) return;
         a.src = url;
         await a.play();
@@ -459,6 +485,13 @@
       const all = speechSynthesis.getVoices() || [], v = this.pick();
       const it = all.filter(x => (x.lang || '').toLowerCase().startsWith(LANGCODE().slice(0, 2).toLowerCase()));
       return `${all.length} voci nel telefono, ${it.length} in italiano. ${v ? 'Voce scelta: ' + v.name : 'Nessuna voce italiana trovata.'} · App ${isStandalone() ? 'dalla Home' : 'in Safari'}.`;
+    },
+    /** Scarica in anticipo gli audio di Google dei prossimi passaggi, uno alla volta, così la lettura è immediata. */
+    prefetch(texts) {
+      const m = this.mode();
+      if (!S.geminiKey || !(m === 'google' || (m === 'auto' && this.usedGoogle))) return;
+      const list = texts.map(t => this.clean(t)).filter(t => !ttsCache.has(t));
+      (async () => { for (const t of list) { try { await ttsUrl(t); } catch (e) { return; } } })();
     },
     stop() {
       this.token++; this.queue = []; clearTimeout(this.watchdog);
@@ -1167,6 +1200,8 @@
       return h;
     }
     after(view) {
+      // con la voce di Google preparo subito questo passaggio e i due successivi
+      Voice.prefetch([this.step, this.step + 1, this.step + 2].filter(k => k < this.r.steps.length).map(k => this.stepSpeech(k)));
       const art = $('#cookart', view);
       if (!art) return;
       let x0 = null, y0 = null;
@@ -1181,7 +1216,8 @@
     go(s) { this.step = s; this.refresh(); $('#view').scrollTop = 0; if (this.voice) this.say(); }
     next() { if (this.step < this.r.steps.length - 1) this.go(this.step + 1); }
     prev() { if (this.step > 0) this.go(this.step - 1); }
-    say() { speak(`Passo ${this.step + 1}. ` + this.r.steps[this.step]); }
+    stepSpeech(k) { return `Passo ${k + 1}. ` + this.r.steps[k]; }
+    say() { speak(this.stepSpeech(this.step)); }
     toggleVoice() { this.voice = !this.voice; if (this.voice) this.say(); else stopSpeaking(); toast(this.voice ? 'Lettura ad alta voce attiva' : 'Lettura disattivata'); this.rebuild(); }
     tStart(id) {
       id = +id;
@@ -1445,7 +1481,7 @@
       return `<div class="row" style="margin-top:-14px">${stat(S.imported.length, 'ricette tue')}${stat(S.favorites.length, 'preferite')}${stat(cooked, 'piatti cucinati')}</div>`
         + `<div class="card menu" style="padding:6px">${item('book', 'Le mie ricette', 'Scrivi, modifica e organizza le tue ricette', 'mine')}${item('edit', 'Nuova ricetta', 'Con calcolo automatico di calorie e reparti', 'newOne')}`
         + `${item('copy', 'Importa da un testo', 'Didascalie, trascrizioni, pagine web', 'importText')}${item('heart', 'Preferiti', S.favorites.length ? S.favorites.length + ' ricette' : 'Ancora nessuno', 'favs')}${item('gear', 'Impostazioni', 'Gemini, lingua, tema, famiglia', 'settings')}</div>`
-        + `<div class="card"><div class="row"><img src="icons/icon-192.png" alt="" style="width:48px;height:48px;border-radius:12px"><div class="grow"><h3>RecipeFlow</h3><div class="muted mt4">Web app · versione 1.3 · di Arturo Clemente</div></div></div>`
+        + `<div class="card"><div class="row"><img src="icons/icon-192.png" alt="" style="width:48px;height:48px;border-radius:12px"><div class="grow"><h3>RecipeFlow</h3><div class="muted mt4">Web app · versione 1.4 · di Arturo Clemente</div></div></div>`
         + `<p class="muted">Ricette dal web con Google Gemini (piano gratuito), versione leggera calcolata sul telefono, impasti con parametri, piano settimanale e spesa. I dati restano su questo telefono. I valori nutrizionali sono stime da tabelle medie e non sostituiscono il parere di un nutrizionista.</p>`
         + (isStandalone() ? '' : `<div class="res"><b>Installala sul telefono</b><div class="muted mt4">iPhone: in Safari tocca Condividi → «Aggiungi alla schermata Home». Android: menu ⋮ di Chrome → «Installa app».</div></div>`) + '</div>';
     }
