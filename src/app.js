@@ -11,9 +11,9 @@
   // =====================================================================
   // DATI (salvati nel telefono: localStorage + IndexedDB per le foto)
   // =====================================================================
-  const KEY = 'recipeflow.v2';
+  const KEY = 'recipeflow.v1';
   const S = {
-    favorites: [], imported: [], shopping: [], plan: {}, fridge: [], staples: true, household: 2, personal: {}, webCache: {}, history: [],
+    favorites: [], imported: [], shopping: [], plan: {}, fridge: [], staples: true, household: 2, personal: {}, webCache: {}, hidden: [], history: [],
     geminiKey: '', geminiModel: RF.DEFAULT_MODEL, lang: 'it', accent: 'Menta', appearance: 'system', speakSteps: false, speakRate: 1
   };
   let builtin = [];
@@ -39,6 +39,7 @@
   function addSamples() {
     let n = 0;
     for (const r of builtin) if (!find(S.imported, r.id)) { S.imported.push(RF.copy(r)); n++; }
+    S.hidden = [];
     save();
     return n;
   }
@@ -68,11 +69,18 @@
     save();
   }
   function saveMine(r) {
-    const old = find(S.imported, r.id);
+    const id = baseId(r.id);
+    const old = find(S.imported, id);
     if (old) S.imported.splice(S.imported.indexOf(old), 1);
     S.imported.unshift(r);
-    const fav = find(S.favorites, r.id);
+    const fav = find(S.favorites, id);
     if (fav) S.favorites[S.favorites.indexOf(fav)] = RF.copy(r);
+    if (S.webCache[id]) S.webCache[id] = RF.copy(r);
+    for (const k of Object.keys(S.plan)) {
+      if (baseId(S.plan[k].recipe.id) === id) {
+        S.plan[k].recipe = RF.copy(r);
+      }
+    }
     save();
   }
   function del(r) {
@@ -583,14 +591,19 @@
     recipeMenu(id) {
       const r = byId(id) || allKnown().find(x => x.id === id);
       if (!r) return;
-      const fav = isFav(r), mine = isMine(r), bi = isBuiltin(r);
+      const fav = isFav(r), mine = isMine(r);
       const delLabel = mine ? 'Elimina definitivamente' : 'Rimuovi';
-      choose(r.title, [fav ? 'Togli dai preferiti' : 'Aggiungi ai preferiti', 'Apri', delLabel], i => {
+      choose(r.title, [fav ? 'Togli dai preferiti' : 'Aggiungi ai preferiti', 'Apri', 'Modifica', delLabel], i => {
         if (i === 0) { toggleFav(r); nav.top().refresh(); }
         else if (i === 1) openRecipe(r);
+        else if (i === 2) {
+          const c = RF.copy(cached(r));
+          if (!mine) { c.id = 'my-' + Date.now().toString(36); c.source = 'Le mie ricette'; if (c.kind && c.kind.startsWith('idea:')) c.kind = ''; }
+          nav.push(new Editor(c));
+        }
         else confirmBox(delLabel + '?', mine ? 'La ricetta, le tue note e la foto verranno eliminate per sempre. Non si può annullare.' : 'Verrà tolta da preferiti, piano e ricette cercate.',
           mine ? 'Elimina' : 'OK', () => { del(r); nav.top().refresh(); toast('Fatto'); }, mine);
-      }, 2);
+      }, 3);
     }
   };
 
@@ -694,6 +707,7 @@
     constructor(r) {
       super();
       this.base = r; this.dough = null; this.moldBase = 0; this.mold = 0; this.light = false; this.disabled = new Set(); this.coachText = null;
+      this.ingEdits = {}; this.removedIngs = new Set(); this.extraIngs = []; this.stepEdits = {}; this.extraSteps = []; this.inlineDirty = false;
       if (r.kind.startsWith('dough:')) this.dough = RF.doughPreset(RF.STYLES[r.kind.slice(6)] ? r.kind.slice(6) : 'NAPOLETANA');
       else if (r.kind.startsWith('mold:')) this.moldBase = this.mold = parseInt(r.kind.slice(5), 10) || 0;
       this.servings = this.dough ? this.dough.count : r.servings;
@@ -701,12 +715,35 @@
     get title() { return this.base.title; }
     actions() {
       const fav = isFav(this.base);
-      return `<button class="ibtn" data-a="fav" style="${fav ? 'color:#FF4D6D' : ''}">${ic(fav ? 'heartFill' : 'heart')}</button>${ibtn('share', 'shareIt')}${ibtn('dots', 'menu')}`;
+      return `${ibtn('edit', 'editRecipe')}<button class="ibtn" data-a="fav" style="${fav ? 'color:#FF4D6D' : ''}">${ic(fav ? 'heartFill' : 'heart')}</button>${ibtn('share', 'shareIt')}${ibtn('dots', 'menu')}`;
+    }
+    applyInline(rec) {
+      const hasIngMod = Object.keys(this.ingEdits).length > 0 || this.removedIngs.size > 0 || this.extraIngs.length > 0;
+      const hasStepMod = Object.keys(this.stepEdits).length > 0 || this.extraSteps.length > 0;
+      if (!hasIngMod && !hasStepMod) return rec;
+      const c = RF.copy(rec);
+      if (hasIngMod) {
+        const nextIngs = [];
+        c.ingredients.forEach((item, idx) => {
+          if (this.removedIngs.has(idx)) return;
+          if (this.ingEdits[idx]) nextIngs.push(RF.copy(this.ingEdits[idx]));
+          else nextIngs.push(item);
+        });
+        for (const ex of this.extraIngs) nextIngs.push(RF.copy(ex));
+        c.ingredients = nextIngs;
+      }
+      if (hasStepMod) {
+        const nextSteps = c.steps.map((st, k) => this.stepEdits[k] !== undefined ? this.stepEdits[k] : st);
+        for (const es of this.extraSteps) nextSteps.push(es);
+        c.steps = nextSteps;
+      }
+      return c;
     }
     original() {
-      if (this.dough) return RF.Dough.build(this.dough, this.base);
-      if (this.moldBase > 0 && this.mold !== this.moldBase) return RF.scaleMold(this.base, this.moldBase, this.mold);
-      return this.base;
+      let baseRec = this.base;
+      if (this.dough) baseRec = RF.Dough.build(this.dough, baseRec);
+      else if (this.moldBase > 0 && this.mold !== this.moldBase) baseRec = RF.scaleMold(baseRec, this.moldBase, this.mold);
+      return this.applyInline(baseRec);
     }
     lightRes() { return RF.lighten(this.original(), this.disabled); }
     shown() { return this.light ? this.lightRes().light : this.original(); }
@@ -724,6 +761,7 @@
       const tags = r.tags.filter(t => t !== 'Dal web').map(t => pill(t, t === 'Virale' ? 'warn' : 'muted')).join(' ');
       h += `<div class="flow mt12">${r.minutes > 0 ? pill('⏱ ' + r.minutes + ' min', 'acc') : ''}${pill(r.difficulty, 'muted')}${pill(r.source, 'muted')}${tags}${p.cooked ? pill('Cucinata ' + p.cooked + (p.cooked === 1 ? ' volta' : ' volte'), 'acc') : ''}</div>`;
       h += `<div class="btns">${btn('Cucina', 'play', 'pri', 'cook')}${btn('Spesa', 'cart', '', 'shop')}${btn('Piano', 'calendar', '', 'plan')}</div>`;
+      h += `<div class="inline-bar">${btn('Modifica completa', 'edit', '', 'editRecipe')}${this.inlineDirty ? `${btn('Salva come mia', 'check', 'pri', 'saveInlineAsMine')}${btn('Ripristina', 'refresh', '', 'resetInline')}` : ''}</div>`;
 
       // versione leggera
       const kb = RF.perServing(orig).kcal, ka = RF.perServing(lr.light).kcal;
@@ -744,11 +782,13 @@
 
       // ingredienti
       h += `<div class="card"><div class="row"><h2 class="grow">Ingredienti</h2>${this.dough ? '' : stepper(this.servings + ' porz.', 'servMinus', 'servPlus')}</div>`;
-      for (const i of r.ingredients) {
+      r.ingredients.forEach((i, idx) => {
         const have = RF.pantryHas(S.fridge, S.staples, i.name);
-        h += `<div class="ingr"><span class="dot ${have ? 'have' : ''}"></span><div class="grow">${esc(i.name)}${i.note ? `<div class="small acc" style="text-transform:none;letter-spacing:0">${esc(i.note)}</div>` : ''}</div><div class="q">${esc(RF.quantityLabel(i, f))}</div></div>`;
-      }
-      if (S.fridge.length) h += `<p class="muted">● verde = ce l'hai già (dal tuo frigo)</p>`;
+        h += `<div class="ingr editable" data-a="editIngredient" data-x="${idx}"><span class="dot ${have ? 'have' : ''}"></span><div class="grow">${esc(i.name)}${i.note ? `<div class="small acc" style="text-transform:none;letter-spacing:0">${esc(i.note)}</div>` : ''}</div><div class="q">${esc(RF.quantityLabel(i, f))}</div></div>`;
+      });
+      h += `<div class="mt12">${btn('Aggiungi ingrediente', 'plus', 'block', 'addIngredientInline')}</div>`;
+      if (S.fridge.length) h += `<p class="muted">● verde = ce l'hai già (dal tuo frigo) · tocca un ingrediente per modificarlo</p>`;
+      else h += `<p class="muted">Tocca un ingrediente per cambiare dose o rimuoverlo.</p>`;
       h += '</div>';
 
       // passaggi
@@ -756,9 +796,9 @@
       r.steps.forEach((st, k) => {
         const kind = RF.classify(st), secs = RF.seconds(st);
         const txt = stepHtml(st);
-        h += `<div class="step"><div class="art">${RF.stepSvg(st, dark)}</div><div class="grow"><div class="small acc">Passo ${k + 1} · ${RF.KIND_LABEL[kind]}</div><div class="mt4">${txt}</div>${secs ? `<div class="mt8">${pill('⏲ ' + RF.fmtSecs(secs), 'acc')}</div>` : ''}</div></div>`;
+        h += `<div class="step editable" data-a="editStepInline" data-x="${k}"><div class="art">${RF.stepSvg(st, dark)}</div><div class="grow"><div class="small acc">Passo ${k + 1} · ${RF.KIND_LABEL[kind]}</div><div class="mt4">${txt}</div>${secs ? `<div class="mt8">${pill('⏲ ' + RF.fmtSecs(secs), 'acc')}</div>` : ''}</div></div>`;
       });
-      h += `<div class="mt12">${btn('Avvia la modalità cucina', 'play', 'pri block', 'cook')}</div></div>`;
+      h += `<div class="inline-bar">${btn('Aggiungi passo', 'plus', '', 'addStepInline')}${btn('Avvia la modalità cucina', 'play', 'pri', 'cook')}</div></div>`;
 
       // fonti
       if (r.notes || r.sources.length) {
@@ -899,6 +939,72 @@
       t += r.ingredients.map(i => `• ${i.name} — ${RF.quantityLabel(i, f)}`).join('\n') + '\n\nPROCEDIMENTO\n' + r.steps.map((s, k) => `${k + 1}. ${s}`).join('\n');
       if (r.sourceUrl) t += '\n\nFonte: ' + r.sourceUrl;
       share(r.title, t + '\n\nCondivisa da RecipeFlow');
+    }
+    editRecipe() {
+      const mine = isMine(this.base);
+      const c = RF.copy(this.forCooking());
+      if (!mine) { c.id = 'my-' + Date.now().toString(36); c.source = 'Le mie ricette'; if (c.kind && c.kind.startsWith('idea:')) c.kind = ''; }
+      nav.push(new Editor(c));
+    }
+    editIngredient(idx) {
+      idx = +idx;
+      const list = this.shown().ingredients;
+      const item = list[idx];
+      if (!item) return;
+      choose(item.name, ['Modifica quantità / nome', 'Rimuovi ingrediente'], k => {
+        if (k === 1) {
+          this.removedIngs.add(idx);
+          this.inlineDirty = true;
+          this.refresh();
+          return;
+        }
+        ask('Modifica ingrediente', 'es. 250 g farina', RF.lineOf(item), false, txt => {
+          this.ingEdits[idx] = RF.parseLine(txt);
+          this.inlineDirty = true;
+          this.refresh();
+        });
+      }, 1);
+    }
+    addIngredientInline() {
+      ask('Nuovo ingrediente', 'es. 150 g zucchine', '', false, txt => {
+        this.extraIngs.push(RF.parseLine(txt));
+        this.inlineDirty = true;
+        this.refresh();
+      });
+    }
+    editStepInline(k) {
+      k = +k;
+      const steps = this.shown().steps;
+      const cur = steps[k] || '';
+      ask(`Passo ${k + 1}`, 'Scrivi il testo del passaggio', cur.replace(/\s*→ Versione leggera:.*$/, ''), true, txt => {
+        this.stepEdits[k] = txt;
+        this.inlineDirty = true;
+        this.refresh();
+      });
+    }
+    addStepInline() {
+      ask('Nuovo passaggio', 'Descrivi il passaggio (es. Cuoci in forno 15 minuti)', '', true, txt => {
+        this.extraSteps.push(txt);
+        this.inlineDirty = true;
+        this.refresh();
+      });
+    }
+    saveInlineAsMine() {
+      const r = RF.copy(this.forCooking());
+      r.id = 'my-' + Date.now().toString(36);
+      r.source = 'Le mie ricette';
+      r.light = false;
+      saveMine(r);
+      this.inlineDirty = false;
+      toast('Salvata tra «Le mie ricette»');
+      this.base = r;
+      this.ingEdits = {}; this.removedIngs.clear(); this.extraIngs = []; this.stepEdits = {}; this.extraSteps = [];
+      this.refresh();
+    }
+    resetInline() {
+      this.ingEdits = {}; this.removedIngs.clear(); this.extraIngs = []; this.stepEdits = {}; this.extraSteps = []; this.inlineDirty = false;
+      toast('Modifiche ripristinate');
+      this.refresh();
     }
     menu() {
       const mine = isMine(this.base), bi = isBuiltin(this.base);

@@ -207,3 +207,10 @@ textarea.input { resize: vertical; min-height: 92px; line-height: 1.45; }
 @keyframes pop { from { transform: scale(.94); opacity: 0; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (min-width: 700px) { #view { padding-left: max(16px, calc(50% - 330px)); padding-right: max(16px, calc(50% - 330px)); } .grid { grid-template-columns: 1fr 1fr 1fr; } }
+
+.ingr.editable { cursor: pointer; }
+.ingr.editable:active { background: var(--surface2); border-radius: 10px; }
+.step.editable { cursor: pointer; border-radius: 12px; }
+.step.editable:active { background: var(--surface2); }
+.inline-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.inline-bar .btn { flex: 1; min-width: 140px; }
