@@ -14,16 +14,16 @@
     }
     get ready() { return !!this.key; }
 
-    async generate(system, prompt, { maxTokens = 2000, json = false, search = false, model = null } = {}) {
-      try { return await this.call(system, prompt, maxTokens, json, search, model); }
+    async generate(system, prompt, { maxTokens = 2000, json = false, search = false, model = null, tools = null } = {}) {
+      try { return await this.call(system, prompt, maxTokens, json, search, model, tools); }
       catch (e) {
         const m = model || this.model;
-        if (String(e.message).startsWith('Gemini 404') && m !== FALLBACK_MODEL) return this.call(system, prompt, maxTokens, json, search, FALLBACK_MODEL);
+        if (String(e.message).startsWith('Gemini 404') && m !== FALLBACK_MODEL) return this.call(system, prompt, maxTokens, json, search, FALLBACK_MODEL, tools);
         throw e;
       }
     }
 
-    async call(system, prompt, maxTokens, json, search, modelOverride) {
+    async call(system, prompt, maxTokens, json, search, modelOverride, tools) {
       if (!this.key) throw new Error('Inserisci la chiave gratuita di Gemini in Altro → Impostazioni.');
       const m = modelOverride || this.model;
       const body = {
@@ -31,7 +31,8 @@
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: Object.assign({ maxOutputTokens: Math.max(4096, maxTokens * 3) }, json ? { responseMimeType: 'application/json' } : {})
       };
-      if (search) body.tools = [{ google_search: {} }];
+      if (tools) body.tools = tools;
+      else if (search) body.tools = [{ google_search: {} }];
       let resp;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 120000);
@@ -60,7 +61,7 @@
       for (const ch of ((cand.groundingMetadata && cand.groundingMetadata.groundingChunks) || [])) {
         if (ch.web && ch.web.uri) sources.push([ch.web.title || ch.web.uri, ch.web.uri]);
       }
-      return { text: out, sources, web: search };
+      return { text: out, sources, web: search || !!tools };
     }
 
     /** Prova con la ricerca Google (modello scelto, poi gemini-2.5-flash); se non è disponibile risponde senza. */
@@ -182,6 +183,45 @@
       return t.replace(/\*\*/g, '').replace(/^#+\s*/gm, '');
     }
 
+    /** Ricetta da un link (sito, blog, post social): Gemini legge la pagina; se non ci riesce cerca la stessa ricetta sul web. */
+    async importUrl(url, progress) {
+      const L = langEnglish(this.lang);
+      const system = 'You extract cooking recipes from web pages. Read the page at the URL the user gives (use the URL context tool). '
+        + 'It may be a recipe site, a blog, or a social media post/video (Instagram, TikTok, YouTube, Facebook) where the recipe is in the caption or description. '
+        + 'If the page cannot be read or has no full recipe, search the web for the same recipe (same author and dish) and use the most faithful version.\n'
+        + `Write everything in ${L}. Reply ONLY with valid JSON, no markdown:\n`
+        + '{"found": true or false, "title": "...", "description": "1-2 sentences", "servings": number, "minutes": number, "tags": ["..."],\n'
+        + ' "ingredients": [{"name": "...", "en": "ingredient name in English", "amount": number, "unit": "g|ml|pz|cucchiaio|cucchiaino|q.b.", "grams": number,\n'
+        + '   "per100g": {"kcal": n, "prot": n, "carb": n, "sug": n, "fat": n, "sat": n, "fib": n}}],\n'
+        + ' "steps": ["step 1", "..."], "notes": "where the recipe comes from, and anything you had to estimate"}\n'
+        + 'Convert cups, ounces and Fahrenheit to grams, millilitres and Celsius. If quantities are missing, estimate them realistically.';
+      const attempts = [[{ url_context: {} }, { google_search: {} }], [{ url_context: {} }], [{ google_search: {} }]];
+      let res = null, last = null;
+      for (const tools of attempts) {
+        for (const m of [this.model, FALLBACK_MODEL]) {
+          try {
+            progress && progress(tools.length === 1 && tools[0].google_search ? 'Cerco la ricetta sul web…' : 'Leggo la pagina…');
+            res = await this.call(system, 'URL: ' + url, 4000, false, false, m, tools);
+            break;
+          } catch (e) { last = e; if (/chiave non valida|connessione|Limite/.test(e.message)) throw e; }
+        }
+        if (res) break;
+      }
+      if (!res) throw last || new Error('Non riesco a leggere questo link.');
+      progress && progress('Scrivo la ricetta…');
+      const j = Ai.extractJson(res.text);
+      if (j.found === false || !(j.ingredients || []).length) throw new Error('In questa pagina non ho trovato una ricetta. Prova a copiare il testo della ricetta e incollarlo qui sotto.');
+      const r = Ai.recipeFromJson(j, this.lang);
+      r.id = 'my-' + Date.now().toString(36);
+      r.source = 'Importata dal web';
+      r.sourceUrl = url;
+      r.notes = j.notes || '';
+      let host = url; try { host = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { }
+      r.sources = [host + '|' + url, ...res.sources.filter(x => x[1] !== url).slice(0, 4).map(([t, u]) => t + '|' + u)];
+      if (!r.tags.includes('Importata')) r.tags.unshift('Importata');
+      return r;
+    }
+
     async importText(text) {
       const L = langEnglish(this.lang);
       const system = `Extract a cooking recipe from the given text (it may be a social media caption, a video transcript or a web page). Write everything in ${L}.\n`
@@ -213,7 +253,7 @@
     /** Voce di Google: restituisce un file audio WAV con il testo letto. */
     async tts(text) {
       if (!this.key) throw new Error('Serve la chiave di Gemini (Altro → Impostazioni).');
-      const models = ['gemini-2.5-flash-preview-tts', 'gemini-2.5-flash-tts'];
+      const models = ['gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-tts', 'gemini-2.5-flash-tts'];
       let last = null;
       for (const m of models) {
         let resp;

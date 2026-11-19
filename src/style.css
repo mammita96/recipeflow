@@ -207,3 +207,22 @@ textarea.input { resize: vertical; min-height: 92px; line-height: 1.45; }
 @keyframes pop { from { transform: scale(.94); opacity: 0; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (min-width: 700px) { #view { padding-left: max(16px, calc(50% - 330px)); padding-right: max(16px, calc(50% - 330px)); } .grid { grid-template-columns: 1fr 1fr 1fr; } }
+
+/* pulsante Ferma lettura, sempre visibile mentre la voce parla */
+.stopvoice { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(92px + var(--sab)); z-index: 55; display: flex; align-items: center; gap: 10px;
+  background: var(--danger); color: #fff; border: 0; border-radius: 24px; padding: 12px 20px; font-weight: 700; font-size: 15px; box-shadow: 0 6px 20px rgba(0,0,0,.25); cursor: pointer; animation: fade .2s; }
+.stopvoice .sq { width: 12px; height: 12px; background: #fff; border-radius: 2px; }
+
+/* barra dei timer */
+.dock { flex: none; display: flex; gap: 8px; overflow-x: auto; padding: 0 16px 8px; scrollbar-width: none; background: var(--bg); }
+.dock::-webkit-scrollbar { display: none; }
+.dock.hide { display: none; }
+.tchip { flex: none; border: 0; border-radius: 16px; padding: 7px 12px; font-size: 13.5px; font-weight: 600; background: color-mix(in srgb, var(--accent) 22%, var(--surface)); color: var(--text); cursor: pointer; white-space: nowrap; }
+.tchip b { font-variant-numeric: tabular-nums; margin-left: 2px; }
+.tchip.pause { background: var(--surface2); color: var(--muted); }
+.tchip.done { background: var(--danger); color: #fff; animation: blink 1s infinite; }
+.tchip.add { background: none; border: 1px dashed var(--line); color: var(--hilite); }
+@keyframes blink { 50% { opacity: .55; } }
+
+select.input { -webkit-appearance: none; appearance: none; padding-right: 34px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 12px) 50%; background-size: 6px 6px; background-repeat: no-repeat; }
