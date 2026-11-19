@@ -591,6 +591,94 @@ function emoji(r) {
   return '🍽️';
 }
 
-Object.assign(RF, { AISLES, FOODS, N, scaleN, matchFood, aisleOf, toGrams, ingredient, copy, normRecipe, total, perServing, hasTag, fmtNum, quantityLabel,
+
+// ===================== PARAMETRI PER OGNI RICETTA =====================
+const RX = {
+  flour: /\b(farin|semol|manitob|flour|fecola|amido di mais)/i,
+  liquid: /\b(acqua|latte|water|milk|birra)\b(?!.*(cottura|per la pentola|per lessare|bollente per))/i,
+  salt: /^\s*sale\b|\bsalt\b/i,
+  fat: /\b(olio|burro|strutto|butter|oil|lard)\b/i,
+  yeast: /\blievito\b(?!.*(dolci|vanigl|chimic|istantaneo per))|\byeast\b|\bmadre\b|\bpasta madre\b/i,
+  chem: /lievito.*(dolci|vanigl|chimic)|bicarbonat|baking (powder|soda)|cremor tartaro/i,
+  cake: /\b(torta|cake|cheesecake|crostata|pan di spagna|ciambell|chiffon|sacher)/i
+};
+const isQb = i => i.unit === 'q.b.' || !(i.grams > 0);
+const yeastKind = name => /secco|dry|disidrat|istantaneo/i.test(name) ? 'dry' : /madre|sourdough|lievitino/i.test(name) ? 'madre' : 'fresh';
+
+/** Riconosce che tipo di ricetta è, per proporre i parametri giusti. */
+function analyze(r) {
+  const idx = re => r.ingredients.map((i, k) => k).filter(k => !isQb(r.ingredients[k]) && re.test(r.ingredients[k].name));
+  const flour = idx(RX.flour).filter(k => !/stesura|spolver|per la spianatoia|per il piano/i.test(r.ingredients[k].name));
+  const yeast = idx(RX.yeast).filter(k => !RX.chem.test(r.ingredients[k].name));
+  const liquid = idx(RX.liquid).filter(k => !yeast.includes(k)), salt = idx(RX.salt), fat = idx(RX.fat);
+  const g = ks => ks.reduce((a, k) => a + r.ingredients[k].grams, 0);
+  const flourG = g(flour), liquidG = g(liquid);
+  const title = (r.title + ' ' + r.description).toLowerCase();
+  const bready = /pizz|focacc|pane\b|pane |panin|piadin|bagel|brioche|grissin|taralli|frisell|ciabatt|baguette|pan bauletto|crackers|impasto/.test(title);
+  const isDough = flour.length > 0 && flourG >= 120 && liquidG > 0 && (yeast.length > 0 || bready) && !RX.chem.test(r.ingredients.map(i => i.name).join(' '));
+  // stampo: diametro citato nei passaggi o torta senza diametro
+  const text = r.steps.join(' ') + ' ' + r.description;
+  const m = /(?:stampo|tortiera|cerchio|teglia)[^.]{0,40}?(?:Ø|diametro|da)?\s*(\d{2})\s*cm/i.exec(text);
+  let mold = m ? parseInt(m[1], 10) : 0;
+  if (mold && (mold < 14 || mold > 34)) mold = 0;
+  const isCake = RX.cake.test(r.title) || (hasTag(r, 'Dolce') && /stampo|tortiera/i.test(text));
+  if (!mold && isCake && !isDough) mold = 24;
+  let style = null;
+  if (/pizz|focacc/.test(title)) style = /focacc/.test(title) ? 'FOCACCIA' : /teglia/.test(title) ? 'TEGLIA' : /pala|pinsa/.test(title) ? 'PALA' : /romana|tonda|sottile|scrocchiarella/.test(title) ? 'TONDA' : 'NAPOLETANA';
+  return {
+    flour, liquid, salt, fat, yeast, flourG, liquidG, isDough, style, mold, moldGuessed: !m && mold > 0,
+    hydration: flourG ? liquidG / flourG * 100 : 0,
+    saltPct: flourG ? g(salt) / flourG * 100 : 0,
+    fatPct: flourG ? g(fat) / flourG * 100 : 0,
+    yeastPct: flourG ? g(yeast) / flourG * 100 : 0,
+    yeastKind: yeast.length ? yeastKind(r.ingredients[yeast[0]].name) : 'fresh'
+  };
+}
+
+function scaleIng(i, f) { i.amount = Math.round(i.amount * f * 10) / 10; i.grams *= f; i.n = scaleN(i.n, f); }
+
+/** Applica i parametri dell'impasto (percentuali sulla farina) alla ricetta, senza cambiare gli altri ingredienti. */
+function applyDough(r, a, p) {
+  const out = copy(r);
+  const setPct = (ks, pct) => {
+    const cur = ks.reduce((s, k) => s + out.ingredients[k].grams, 0);
+    const target = a.flourG * pct / 100;
+    if (cur > 0) ks.forEach(k => scaleIng(out.ingredients[k], target / cur));
+  };
+  setPct(a.liquid, p.hydration);
+  if (a.salt.length) setPct(a.salt, p.salt);
+  else if (p.salt > 0) out.ingredients.push(ingredient('Sale fino', Math.round(a.flourG * p.salt / 10) / 10, 'g', 0, 'salt'));
+  if (a.fat.length) setPct(a.fat, p.fat);
+  else if (p.fat > 0) out.ingredients.push(ingredient('Olio extravergine', Math.round(a.flourG * p.fat / 100), 'g', 0, 'olive oil'));
+  // lievito: per percentuale o calcolato sui tempi di lievitazione
+  let pct = p.yeast;
+  if (p.byTime) {
+    const fresh = Dough.freshYeastPct({ ambHours: p.ambHours, fridgeHours: p.fridgeHours, temp: p.temp });
+    pct = p.yeastKind === 'dry' ? fresh / 3 : p.yeastKind === 'madre' ? Math.min(35, fresh * 10) : fresh;
+  }
+  const yName = p.yeastKind === 'dry' ? 'Lievito di birra secco' : p.yeastKind === 'madre' ? 'Lievito madre (rinfrescato)' : 'Lievito di birra fresco';
+  if (a.yeast.length) {
+    const k = a.yeast[0], y = out.ingredients[k];
+    a.yeast.slice(1).forEach(j => { out.ingredients[j].amount = 0; out.ingredients[j].grams = 0; out.ingredients[j].n = N(); });
+    const g = a.flourG * pct / 100;
+    const key = p.yeastKind === 'madre' ? 'farina' : 'lievito_birra';
+    const nn = FOODS[key] ? scaleN(FOODS[key].per100, g / 100) : N();
+    Object.assign(y, { name: yName, amount: Math.round(g * 10) / 10, unit: 'g', grams: g, n: nn, note: p.byTime ? 'calcolato sui tempi di lievitazione' : y.note });
+  } else if (pct > 0) {
+    out.ingredients.push(ing('lievito_birra', yName, Math.round(a.flourG * pct / 10) / 10, 'g'));
+  }
+  out.ingredients = out.ingredients.filter(i => !(i.amount === 0 && i.grams === 0 && i.unit !== 'q.b.' && i.n.kcal === 0 && a.yeast.length && /lievito/i.test(i.name)));
+  return out;
+}
+
+/** Testo con i tempi dell'impasto (per le ricette dal web). */
+function doughTimeline(p) {
+  return Dough.schedule({ bakeHour: p.bakeHour, ambHours: p.ambHours, fridgeHours: p.fridgeHours });
+}
+
+/** Scala tutta la ricetta di un fattore (usato per "ho solo 400 g di…"). */
+function scaleRecipe(r, f) { const out = copy(r); out.ingredients.forEach(i => scaleIng(i, f)); return out; }
+
+Object.assign(RF, { analyze, applyDough, doughTimeline, scaleRecipe, AISLES, FOODS, N, scaleN, matchFood, aisleOf, toGrams, ingredient, copy, normRecipe, total, perServing, hasTag, fmtNum, quantityLabel,
   lighten, balanceScore, grade, STYLES, TRAYS, doughPreset, Dough, MOLDS, scaleMold, SUGGEST, pnorm, isStaple, pantryHas, pantryMatch,
   classify, KIND_LABEL, temperature, seconds, fmtSecs, parseLine, lineOf, emoji });

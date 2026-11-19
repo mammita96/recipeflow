@@ -6,6 +6,7 @@
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const ic = n => RF.icon(n);
   const kcal = v => String(Math.round(v));
+  const fmtServ = v => Number.isInteger(v) ? String(v) : v.toFixed(1).replace('.', ',');
   const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s;
 
   // =====================================================================
@@ -335,15 +336,89 @@
   // =====================================================================
   // VOCE, TIMER, SCHERMO ACCESO
   // =====================================================================
-  function speak(text) {
-    if (!('speechSynthesis' in window)) { toast('Lettura ad alta voce non disponibile'); return; }
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = { it: 'it-IT', en: 'en-US', es: 'es-ES', fr: 'fr-FR', de: 'de-DE', pt: 'pt-PT' }[S.lang] || 'it-IT';
-    u.rate = 1;
-    speechSynthesis.speak(u);
-  }
-  const stopSpeaking = () => { if ('speechSynthesis' in window) speechSynthesis.cancel(); };
+  /**
+   * Lettura ad alta voce. Su iPhone la voce parte solo se "sbloccata" da un tocco e, con il tasto silenzioso attivo,
+   * resta muta: per questo imposto la sessione audio in modalità "riproduzione", scelgo una voce italiana installata,
+   * divido il testo in frasi brevi e non riparto subito dopo un cancel (iOS a volte scarta la frase).
+   */
+  const LANGCODE = () => ({ it: 'it-IT', en: 'en-US', es: 'es-ES', fr: 'fr-FR', de: 'de-DE', pt: 'pt-PT' }[S.lang] || 'it-IT');
+  const Voice = {
+    ok: 'speechSynthesis' in window, voices: [], unlocked: false, queue: [], keep: null, watchdog: null, started: false,
+    init() {
+      if (!this.ok) return;
+      const load = () => { try { this.voices = speechSynthesis.getVoices() || []; } catch (e) { } };
+      load();
+      try { speechSynthesis.addEventListener('voiceschanged', load); } catch (e) { speechSynthesis.onvoiceschanged = load; }
+      const first = () => { this.unlock(); };
+      document.addEventListener('touchend', first, { once: true, capture: true });
+      document.addEventListener('click', first, { once: true, capture: true });
+    },
+    pick() {
+      const code = LANGCODE().toLowerCase(), two = code.slice(0, 2);
+      const all = this.voices.length ? this.voices : (speechSynthesis.getVoices() || []);
+      const same = all.filter(v => (v.lang || '').replace('_', '-').toLowerCase().startsWith(two));
+      return same.find(v => v.lang.replace('_', '-').toLowerCase() === code && /enhanced|premium|alice|federica|luca/i.test(v.name))
+        || same.find(v => v.lang.replace('_', '-').toLowerCase() === code && v.localService)
+        || same.find(v => v.localService) || same[0] || null;
+    },
+    /** Da chiamare dentro un tocco: prepara audio e voce. */
+    unlock() {
+      if (!this.ok || this.unlocked) return;
+      this.unlocked = true;
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { }
+      try { // un attimo di silenzio con un elemento audio porta l'iPhone in modalità "riproduzione"
+        const rate = 8000, n = 800, buf = new ArrayBuffer(44 + n * 2), d = new DataView(buf);
+        const w = (o, t) => [...t].forEach((c, i) => d.setUint8(o + i, c.charCodeAt(0)));
+        w(0, 'RIFF'); d.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
+        d.setUint32(24, rate, true); d.setUint32(28, rate * 2, true); d.setUint16(32, 2, true); d.setUint16(34, 16, true); w(36, 'data'); d.setUint32(40, n * 2, true);
+        const a = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+        a.setAttribute('playsinline', ''); a.volume = 0.01;
+        a.play().catch(() => { });
+      } catch (e) { }
+      try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; u.lang = LANGCODE(); speechSynthesis.speak(u); } catch (e) { }
+    },
+    speak(text) {
+      if (!this.ok) { toast('Il browser non supporta la lettura ad alta voce'); return; }
+      this.unlock();
+      const parts = String(text).replace(/\s+/g, ' ').match(/[^.!?;:]+[.!?;:]*/g) || [text];
+      const chunks = [];
+      for (const p of parts) {
+        let t = p.trim();
+        while (t.length > 180) { const cut = t.lastIndexOf(',', 180) > 60 ? t.lastIndexOf(',', 180) + 1 : 180; chunks.push(t.slice(0, cut)); t = t.slice(cut).trim(); }
+        if (t) chunks.push(t);
+      }
+      const busy = speechSynthesis.speaking || speechSynthesis.pending;
+      if (busy) speechSynthesis.cancel();
+      this.queue = chunks;
+      this.started = false;
+      // dopo un cancel iOS ha bisogno di un attimo, altrimenti ignora la nuova frase
+      setTimeout(() => this.next(), busy ? 250 : 0);
+      clearTimeout(this.watchdog);
+      this.watchdog = setTimeout(() => {
+        if (!this.started && this.queue.length + 1 > 0) {
+          toast('Non sento la voce? Disattiva il tasto silenzioso, alza il volume e riprova');
+        }
+      }, 2500);
+    },
+    next() {
+      const t = this.queue.shift();
+      if (!t) return;
+      const u = new SpeechSynthesisUtterance(t);
+      u.lang = LANGCODE();
+      const v = this.pick();
+      if (v) u.voice = v;
+      u.rate = 0.98; u.pitch = 1; u.volume = 1;
+      u.onstart = () => { this.started = true; };
+      u.onend = () => this.next();
+      u.onerror = e => { if (e.error !== 'interrupted' && e.error !== 'canceled') this.next(); };
+      this.keep = u; // tengo un riferimento: Safari a volte interrompe le frasi "dimenticate"
+      try { speechSynthesis.resume(); } catch (e) { }
+      speechSynthesis.speak(u);
+    },
+    stop() { this.queue = []; clearTimeout(this.watchdog); if (this.ok) try { speechSynthesis.cancel(); } catch (e) { } }
+  };
+  const speak = text => Voice.speak(text);
+  const stopSpeaking = () => Voice.stop();
 
   const Timers = {
     list: {}, // id → { end, left, label, running }
@@ -626,9 +701,18 @@
     constructor(r) {
       super();
       this.base = r; this.dough = null; this.moldBase = 0; this.mold = 0; this.light = false; this.disabled = new Set(); this.coachText = null;
+      this.an = RF.analyze(r); this.dp = null; this.oven = 'static'; this.fromWebDough = false; this.moldGuessed = false;
       if (r.kind.startsWith('dough:')) this.dough = RF.doughPreset(RF.STYLES[r.kind.slice(6)] ? r.kind.slice(6) : 'NAPOLETANA');
       else if (r.kind.startsWith('mold:')) this.moldBase = this.mold = parseInt(r.kind.slice(5), 10) || 0;
+      else if (this.an.mold) { this.moldBase = this.mold = this.an.mold; this.moldGuessed = this.an.moldGuessed; }
+      if (!this.dough && this.an.isDough) this.dp = this.dpDefaults();
+      this.hasOven = r.steps.some(st => /\d{2,3}\s*°\s*C/.test(st));
       this.servings = this.dough ? this.dough.count : r.servings;
+    }
+    dpDefaults() {
+      const a = this.an, r1 = v => Math.round(v * 10) / 10;
+      return { hydration: Math.round(a.hydration), salt: r1(a.saltPct), fat: r1(a.fatPct), yeast: a.yeastPct, yeastKind: a.yeastKind, byTime: false,
+        ambHours: 6, fridgeHours: 0, temp: 22, bakeHour: 20, changed: false };
     }
     get title() { return this.base.title; }
     actions() {
@@ -636,16 +720,25 @@
       return `<button class="ibtn" data-a="fav" style="${fav ? 'color:#FF4D6D' : ''}">${ic(fav ? 'heartFill' : 'heart')}</button>${ibtn('share', 'shareIt')}${ibtn('dots', 'menu')}`;
     }
     original() {
-      if (this.dough) return RF.Dough.build(this.dough, this.base);
-      if (this.moldBase > 0 && this.mold !== this.moldBase) return RF.scaleMold(this.base, this.moldBase, this.mold);
-      return this.base;
+      let r;
+      if (this.dough) r = RF.Dough.build(this.dough, this.base);
+      else {
+        r = this.base;
+        if (this.dp && this.dp.changed) r = RF.applyDough(r, this.an, this.dp);
+        if (this.moldBase > 0 && this.mold !== this.moldBase) r = RF.scaleMold(r, this.moldBase, this.mold);
+      }
+      if (this.oven === 'fan') {
+        r = RF.copy(r);
+        r.steps = r.steps.map(st => st.replace(/(\d{2,3})(\s*[-–]\s*(\d{2,3}))?\s*°\s*C/g, (m, a, rng, b) => (+a - 20) + (b ? '-' + (+b - 20) : '') + ' °C (ventilato)'));
+      }
+      return r;
     }
     lightRes() { return RF.lighten(this.original(), this.disabled); }
     shown() { return this.light ? this.lightRes().light : this.original(); }
     factor(r) { return this.dough ? 1 : this.servings / Math.max(1, r.servings); }
     forCooking() {
       const r = RF.copy(this.shown()), f = this.factor(r);
-      if (f !== 1) { for (const i of r.ingredients) { i.amount *= f; i.grams *= f; i.n = RF.scaleN(i.n, f); } r.servings = this.servings; }
+      if (f !== 1) { for (const i of r.ingredients) { i.amount *= f; i.grams *= f; i.n = RF.scaleN(i.n, f); } r.servings = Math.max(1, Math.round(this.servings)); }
       return r;
     }
     render() {
@@ -671,11 +764,13 @@
       h += '</div>';
 
       h += this.nutrition(r);
+      h += this.paramsPanel(r);
       if (this.dough) h += this.doughPanel();
-      else if (this.moldBase > 0) h += this.moldPanel();
+      else if (this.dp) h += this.webDoughPanel();
+      if (!this.dough && this.moldBase > 0) h += this.moldPanel();
 
       // ingredienti
-      h += `<div class="card"><div class="row"><h2 class="grow">Ingredienti</h2>${this.dough ? '' : stepper(this.servings + ' porz.', 'servMinus', 'servPlus')}</div>`;
+      h += `<div class="card"><div class="row"><h2 class="grow">Ingredienti</h2>${this.dough ? '' : stepper(fmtServ(this.servings) + ' porz.', 'servMinus', 'servPlus')}</div>`;
       for (const i of r.ingredients) {
         const have = RF.pantryHas(S.fridge, S.staples, i.name);
         h += `<div class="ingr"><span class="dot ${have ? 'have' : ''}"></span><div class="grow">${esc(i.name)}${i.note ? `<div class="small acc" style="text-transform:none;letter-spacing:0">${esc(i.note)}</div>` : ''}</div><div class="q">${esc(RF.quantityLabel(i, f))}</div></div>`;
@@ -750,7 +845,7 @@
     doughPanel() {
       const d = this.dough, D = RF.Dough, tray = D.usesTray(d);
       const row = (label, val, key) => `<div class="row" style="padding:5px 0"><span class="grow">${label}</span>${stepper(val, 'dMinus', 'dPlus', key)}</div>`;
-      let h = `<div class="card"><div class="row"><span class="acc">${ic('scale')}</span><h2 class="grow">Il tuo impasto</h2></div><p class="muted">Scegli lo stile e regola i parametri: dosi, lievito e passaggi si ricalcolano.</p>`;
+      let h = `<div class="card"><div class="row"><span class="acc">${ic('scale')}</span><h2 class="grow">Il tuo impasto</h2>${this.fromWebDough ? '<button class="link" data-a="fromCalc">Ricetta originale</button>' : ''}</div><p class="muted">Scegli lo stile e regola i parametri: dosi, lievito e passaggi si ricalcolano.</p>`;
       h += `<div class="flow mt12">${Object.entries(RF.STYLES).map(([k, s]) => chip(s.label, k === d.style, 'dStyle', k)).join('')}</div><p class="muted">${esc(RF.STYLES[d.style].desc)}</p><div class="sep"></div>`;
       h += row(tray ? 'Teglie' : 'Panetti', String(d.count), 'count');
       if (tray) h += `<div class="flow mt8">${RF.TRAYS.map((t, i) => chip(t[0], i === d.tray, 'dTray', i)).join('')}</div>`;
@@ -762,17 +857,101 @@
       h += `<div class="res"><b>Farina ${D.g(D.flour(d))} g · Acqua ${D.g(D.water(d))} g · Lievito ${D.g(D.yeastG(d))} g · Sale ${D.g(D.saltG(d))} g${D.oilG(d) > 0 ? ' · Olio ' + D.g(D.oilG(d)) + ' g' : ''}</b><div class="acc mt4" style="font-weight:700">${esc(D.schedule(d))}</div></div></div>`;
       return h;
     }
+    /** Parametri presenti in ogni ricetta: dosi in base a un ingrediente e tipo di forno. */
+    paramsPanel(r) {
+      let h = `<div class="card" id="params"><div class="row"><span class="acc">${ic('scale')}</span><h2 class="grow">Parametri</h2>${this.paramsChanged() ? '<button class="link" data-a="resetAll">Ripristina</button>' : ''}</div>`
+        + `<div class="row mt12"><div class="grow"><h3>Porzioni</h3><div class="muted mt4">${this.dough ? 'Le decidi con panetti e teglie qui sotto' : 'Tutte le dosi si adattano'}</div></div>${this.dough ? '' : stepper(fmtServ(this.servings), 'servMinus', 'servPlus')}</div>`;
+      if (!this.dough) h += `<div class="sep"></div><div class="row"><div class="grow"><h3>Adatta a quello che hai</h3><div class="muted mt4">Es. «ho solo 400 g di pollo»: ricalcolo tutto il resto</div></div>${btn('Scegli', null, '', 'byIngredient')}</div>`;
+      if (this.hasOven) h += `<div class="sep"></div><h3>Il tuo forno</h3><div class="flow mt8">${chip('Statico (come la ricetta)', this.oven === 'static', 'setOven', 'static')}${chip('Ventilato (−20 °C)', this.oven === 'fan', 'setOven', 'fan')}</div>`;
+      if (!this.dough && !this.dp && !this.moldBase) h += `<p class="muted mt12">Per impasti (pizza, pane, focacce) e torte compaiono anche idratazione, lievito e misura dello stampo.</p>`;
+      return h + '</div>';
+    }
+    paramsChanged() {
+      return (this.dp && this.dp.changed) || this.oven !== 'static' || (this.moldBase && this.mold !== this.moldBase) || (!this.dough && this.servings !== this.base.servings) || this.fromWebDough;
+    }
+    /** Parametri dell'impasto per una ricetta qualsiasi (anche dal web): percentuali sulla farina. */
+    webDoughPanel() {
+      const p = this.dp, a = this.an, D = RF.Dough, g = D.g, pc = v => v.toFixed(1).replace('.', ',') + '%';
+      const row = (label, val, key, sub) => `<div class="row" style="padding:5px 0"><div class="grow">${label}${sub ? `<div class="muted" style="font-size:12.5px">${sub}</div>` : ''}</div>${stepper(val, 'gMinus', 'gPlus', key)}</div>`;
+      let h = `<div class="card"><div class="row"><span class="acc">${ic('scale')}</span><h2 class="grow">Parametri dell'impasto</h2>${p.changed ? '<button class="link" data-a="gReset">Originale</button>' : ''}</div>`
+        + `<p class="muted">Calcolati dalla ricetta, in percentuale sulla farina (${g(a.flourG)} g). Cambiali e le dosi si ricalcolano.</p><div class="sep"></div>`;
+      h += row('Idratazione', g(p.hydration) + '%', 'hydration', 'acqua e altri liquidi sulla farina');
+      h += row('Sale', pc(p.salt), 'salt');
+      h += row('Olio / grassi', pc(p.fat), 'fat');
+      h += `<div class="mt8"><span class="small">Lievito</span><div class="flow mt8">${[['fresh', 'Birra fresco'], ['dry', 'Birra secco'], ['madre', 'Lievito madre']].map(([k, l]) => chip(l, p.yeastKind === k, 'gKind', k)).join('')}</div></div>`;
+      h += `<div class="mt12">${toggleRow('Calcola il lievito sui tempi', 'In base a quante ore lieviterà e alla temperatura di casa', p.byTime, 'gByTime')}</div>`;
+      if (p.byTime) {
+        h += row('Ore a temperatura ambiente', D.hrs(p.ambHours), 'ambHours') + row('Ore in frigo', D.hrs(p.fridgeHours), 'fridgeHours')
+          + row('Temperatura della stanza', g(p.temp) + ' °C', 'temp') + row('Inforno alle', String(p.bakeHour).padStart(2, '0') + ':00', 'bakeHour');
+      } else h += row('Dose di lievito', p.yeast.toFixed(p.yeast < 1 ? 2 : 1).replace('.', ',') + '%', 'yeast');
+      const r = this.original(), f = this.factor(r), sum = re => r.ingredients.filter(i => re.test(i.name)).reduce((s, i) => s + i.grams * f, 0);
+      const yeastG = r.ingredients.filter(i => /lievito/i.test(i.name)).reduce((s, i) => s + i.grams * f, 0);
+      h += `<div class="res"><b>Farina ${g(a.flourG * f)} g · Liquidi ${g(a.flourG * f * p.hydration / 100)} g · Lievito ${g(yeastG)} g · Sale ${g(a.flourG * f * p.salt / 100)} g</b>`
+        + (p.byTime ? `<div class="acc mt4" style="font-weight:700">${esc(RF.doughTimeline(p))}</div>` : '') + '</div>';
+      if (a.style) h += `<div class="mt12">${btn('Apri nel calcolatore pizza (stili, panetti, orari)', 'magic', 'block', 'toCalc')}</div><p class="muted">Sostituisce dosi e passaggi con quelli del calcolatore; puoi tornare indietro quando vuoi.</p>`;
+      return h + '</div>';
+    }
     moldPanel() {
       const k = Math.pow(this.mold / this.moldBase, 2);
-      return `<div class="card"><h2>Dimensione dello stampo</h2><p class="muted">La ricetta è pensata per uno stampo da ${this.moldBase} cm: scegli il tuo e le dosi si adattano alla superficie.</p>`
+      return `<div class="card"><h2>Dimensione dello stampo</h2>`
+        + (this.moldGuessed ? `<p class="muted">La ricetta non dice la misura: presumo uno stampo da ${this.moldBase} cm. Se la ricetta originale ne usa un altro, sceglilo qui:</p><div class="flow mt8">${RF.MOLDS.map(d => chip(d + ' cm', d === this.moldBase, 'setMoldBase', d)).join('')}</div><div class="small mt16">Il tuo stampo</div>`
+          : `<p class="muted">La ricetta è pensata per uno stampo da ${this.moldBase} cm: scegli il tuo e le dosi si adattano alla superficie.</p>`)
         + `<div class="flow mt12">${RF.MOLDS.map(d => chip('Ø ' + d + ' cm', d === this.mold, 'setMold', d)).join('')}</div>`
         + `<p class="${this.mold === this.moldBase ? 'muted' : 'acc'}" style="font-weight:700">Dosi × ${k.toFixed(2).replace('.', ',')} rispetto alla ricetta originale</p></div>`;
     }
     // ---- azioni ----
     setLight(x, el) { this.light = el.checked; this.refresh(); }
     setChange(id, el) { if (el.checked) this.disabled.delete(id); else this.disabled.add(id); this.refresh(); }
-    servMinus() { if (this.servings > 1) { this.servings--; this.refresh(); } }
-    servPlus() { if (this.servings < 40) { this.servings++; this.refresh(); } }
+    servMinus() { const v = Math.ceil(this.servings) - 1; if (v >= 1) { this.servings = v; this.refresh(); } }
+    servPlus() { const v = Math.floor(this.servings) + 1; if (v <= 40) { this.servings = v; this.refresh(); } }
+    byIngredient() {
+      const r = this.shown(), f = this.factor(r), list = r.ingredients.filter(i => i.amount > 0 && i.unit !== 'q.b.');
+      if (!list.length) { toast('Questa ricetta non ha quantità da adattare'); return; }
+      choose('Di quale ingrediente hai una quantità precisa?', list.map(i => `${i.name} (nella ricetta: ${RF.quantityLabel(i, f)})`), k => {
+        const i = list[k];
+        ask(`Quanto ${i.name.toLowerCase()} hai?`, `in ${i.unit || 'pezzi'}, es. ${RF.fmtNum(i.amount * f * 0.8)}`, '', false, v => {
+          const amount = parseFloat(v.replace(',', '.'));
+          if (!(amount > 0)) { toast('Scrivi un numero'); return; }
+          this.servings = Math.max(0.5, Math.round(r.servings * amount / i.amount * 10) / 10);
+          toast(`Dosi adattate: ${fmtServ(this.servings)} porzioni`);
+          this.refresh();
+        });
+      });
+    }
+    setOven(o) { this.oven = o; this.refresh(); }
+    resetAll() {
+      this.oven = 'static'; this.mold = this.moldBase;
+      if (this.fromWebDough) { this.dough = null; this.fromWebDough = false; }
+      if (this.an.isDough && !this.dough) this.dp = this.dpDefaults();
+      this.servings = this.dough ? this.dough.count : this.base.servings; this.refresh();
+    }
+    gStep(key, dir) {
+      const p = this.dp, lim = { hydration: [40, 100, 1], salt: [0, 4, 0.1], fat: [0, 30, 0.5], yeast: [0.02, 40, p.yeast < 1 ? 0.05 : p.yeast < 5 ? 0.2 : 1],
+        ambHours: [1, 48, 1], fridgeHours: [0, 96, 6], temp: [16, 30, 1] };
+      if (key === 'bakeHour') p.bakeHour = (p.bakeHour + (dir > 0 ? 1 : 23)) % 24;
+      else { const [mn, mx, st] = lim[key]; p[key] = Math.round(Math.max(mn, Math.min(mx, p[key] + dir * st)) * 100) / 100; }
+      p.changed = true; this.refresh();
+    }
+    gMinus(k) { this.gStep(k, -1); }
+    gPlus(k) { this.gStep(k, 1); }
+    gKind(k) {
+      const p = this.dp, toFresh = { fresh: 1, dry: 3, madre: 0.1 }, fromFresh = { fresh: 1, dry: 1 / 3, madre: 10 };
+      if (!p.byTime) p.yeast = Math.min(40, p.yeast * toFresh[p.yeastKind] * fromFresh[k]);
+      p.yeastKind = k; p.changed = true; this.refresh();
+    }
+    gByTime(x, el) { this.dp.byTime = el.checked; this.dp.changed = true; this.refresh(); }
+    gReset() { this.dp = this.dpDefaults(); this.refresh(); }
+    toCalc() {
+      const a = this.an, d = RF.doughPreset(a.style);
+      d.hydration = Math.max(50, Math.min(95, Math.round(a.hydration)));
+      if (a.saltPct > 0) d.salt = Math.round(a.saltPct * 10) / 10;
+      d.oil = Math.round(a.fatPct * 2) / 2;
+      if (a.yeastKind === 'dry') d.dryYeast = true;
+      this.dough = d; this.fromWebDough = true; this.servings = d.count;
+      toast('Calcolatore pizza attivo'); this.refresh();
+    }
+    fromCalc() { this.dough = null; this.fromWebDough = false; this.servings = this.base.servings; this.refresh(); }
+    setMoldBase(d) { this.moldBase = +d; this.refresh(); }
     dStyle(k) { const old = this.dough, d = RF.doughPreset(k); d.temp = old.temp; d.dryYeast = old.dryYeast; d.bakeHour = old.bakeHour; this.dough = d; this.servings = d.count; this.refresh(); }
     dTray(i) { this.dough.tray = +i; this.refresh(); }
     dDry(x, el) { this.dough.dryYeast = el.checked; this.refresh(); }
@@ -863,7 +1042,8 @@
       const st = r.steps[this.step], secs = RF.seconds(st), id = this.tb + this.step;
       let h = `<div class="cookwrap"><div class="prog">${r.steps.map((_, i) => `<i class="${i <= this.step ? 'on' : ''}"></i>`).join('')}</div>`
         + `<div class="small acc mt16">Passo ${this.step + 1} di ${n} · ${RF.KIND_LABEL[RF.classify(st)]}</div>`
-        + `<div class="art cookart" id="cookart">${RF.stepSvg(st, dark)}</div><div class="cooktext">${stepHtml(st)}</div>`;
+        + `<div class="art cookart" id="cookart">${RF.stepSvg(st, dark)}</div><div class="cooktext">${stepHtml(st)}</div>`
+        + `<div class="mt12"><button class="btn" data-a="say">${ic('speaker')}<span>Leggi ad alta voce</span></button></div>`;
       if (secs) {
         const left = Timers.left(id), t = Timers.list[id], running = t && t.running;
         h += `<div class="card tinted"><div class="row"><span class="acc">${ic('timer')}</span><span class="timer grow" data-timer="${id}">${RF.fmtSecs(left == null ? secs : left)}</span>`
@@ -889,7 +1069,7 @@
     go(s) { this.step = s; this.refresh(); $('#view').scrollTop = 0; if (this.voice) this.say(); }
     next() { if (this.step < this.r.steps.length - 1) this.go(this.step + 1); }
     prev() { if (this.step > 0) this.go(this.step - 1); }
-    say() { speak(`Passo ${this.step + 1}. ` + this.r.steps[this.step]); }
+    say() { speak(`Passo ${this.step + 1}. ` + this.r.steps[this.step].replace(/°\s*C/g, ' gradi').replace(/→/g, '. ').replace(/(\d+)\s*g\b/g, '$1 grammi').replace(/(\d+)\s*ml\b/g, '$1 millilitri')); }
     toggleVoice() { this.voice = !this.voice; if (this.voice) this.say(); else stopSpeaking(); toast(this.voice ? 'Lettura ad alta voce attiva' : 'Lettura disattivata'); this.rebuild(); }
     tStart(id) {
       id = +id;
@@ -1153,7 +1333,7 @@
       return `<div class="row" style="margin-top:-14px">${stat(S.imported.length, 'ricette tue')}${stat(S.favorites.length, 'preferite')}${stat(cooked, 'piatti cucinati')}</div>`
         + `<div class="card menu" style="padding:6px">${item('book', 'Le mie ricette', 'Scrivi, modifica e organizza le tue ricette', 'mine')}${item('edit', 'Nuova ricetta', 'Con calcolo automatico di calorie e reparti', 'newOne')}`
         + `${item('copy', 'Importa da un testo', 'Didascalie, trascrizioni, pagine web', 'importText')}${item('heart', 'Preferiti', S.favorites.length ? S.favorites.length + ' ricette' : 'Ancora nessuno', 'favs')}${item('gear', 'Impostazioni', 'Gemini, lingua, tema, famiglia', 'settings')}</div>`
-        + `<div class="card"><div class="row"><img src="icons/icon-192.png" alt="" style="width:48px;height:48px;border-radius:12px"><div class="grow"><h3>RecipeFlow</h3><div class="muted mt4">Web app · versione 1.0 · di Arturo Clemente</div></div></div>`
+        + `<div class="card"><div class="row"><img src="icons/icon-192.png" alt="" style="width:48px;height:48px;border-radius:12px"><div class="grow"><h3>RecipeFlow</h3><div class="muted mt4">Web app · versione 1.1 · di Arturo Clemente</div></div></div>`
         + `<p class="muted">Ricette dal web con Google Gemini (piano gratuito), versione leggera calcolata sul telefono, impasti con parametri, piano settimanale e spesa. I dati restano su questo telefono. I valori nutrizionali sono stime da tabelle medie e non sostituiscono il parere di un nutrizionista.</p>`
         + (isStandalone() ? '' : `<div class="res"><b>Installala sul telefono</b><div class="muted mt4">iPhone: in Safari tocca Condividi → «Aggiungi alla schermata Home». Android: menu ⋮ di Chrome → «Installa app».</div></div>`) + '</div>';
     }
@@ -1319,6 +1499,7 @@
   async function boot() {
     load();
     applyTheme();
+    Voice.init();
     if (window.matchMedia) matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (S.appearance === 'system') { applyTheme(); nav.draw(true); } });
     try { builtin = (await (await fetch('recipes.json')).json()).map(RF.normRecipe); } catch (e) { builtin = []; }
     history.replaceState({ d: 1 }, '');
